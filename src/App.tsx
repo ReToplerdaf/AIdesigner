@@ -185,7 +185,7 @@ export default function App() {
             </div>
           )}
           {right === 'sld' && <SingleLine calc={calc} project={project} />}
-          {right === 'cables' && <CableLog calc={calc} />}
+          {right === 'cables' && <CableLog calc={calc} rooms={project.rooms} />}
         </div>
       </aside>
     </div>

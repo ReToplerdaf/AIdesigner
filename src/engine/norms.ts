@@ -17,6 +17,7 @@ export const DEVICE_TYPES: Record<DeviceTypeKey, DeviceTypeInfo> = {
   hood: { key: 'hood', label: 'Вытяжка', kind: 'socket', defaultPowerW: 200, cosPhi: 0.9, mountH: 2000, needsRcd: true, glyph: 'В' },
   fridge: { key: 'fridge', label: 'Холодильник', kind: 'socket', defaultPowerW: 300, cosPhi: 0.85, mountH: 300, needsRcd: true, glyph: 'Х' },
   microwave: { key: 'microwave', label: 'СВЧ-печь', kind: 'socket', defaultPowerW: 1200, cosPhi: 0.9, mountH: 1100, needsRcd: true, glyph: 'М' },
+  switch: { key: 'switch', label: 'Выключатель', kind: 'light', defaultPowerW: 0, cosPhi: 1, mountH: 900, needsRcd: false, glyph: 'Вк' },
   other: { key: 'other', label: 'Прочее', kind: 'socket', defaultPowerW: 500, cosPhi: 0.9, mountH: 300, needsRcd: true, glyph: '?' },
 };
 

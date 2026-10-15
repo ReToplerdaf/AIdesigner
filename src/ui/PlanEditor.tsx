@@ -22,6 +22,7 @@ type View = { x: number; y: number; w: number; h: number };
 type Drag =
   | { kind: 'device'; id: string; dx: number; dy: number }
   | { kind: 'panel'; dx: number; dy: number }
+  | { kind: 'box'; key: string; dx: number; dy: number }
   | { kind: 'pan'; start: Pt; view: View; inv: DOMMatrix }
   | { kind: 'room'; start: Pt }
   | null;
@@ -126,6 +127,15 @@ export function PlanEditor(props: Props) {
     setSelection({ kind: 'device', id });
   };
 
+  const startBox = (e: React.PointerEvent, key: string, pos: Pt, groupKey: string) => {
+    if (tool !== 'select' || e.button !== 0) return;
+    e.stopPropagation();
+    svgRef.current!.setPointerCapture(e.pointerId);
+    const p = toSvg(e.clientX, e.clientY);
+    setDrag({ kind: 'box', key, dx: pos.x - p.x, dy: pos.y - p.y });
+    setSelection({ kind: 'group', key: groupKey });
+  };
+
   const startPanel = (e: React.PointerEvent) => {
     if (tool !== 'select' || e.button !== 0) return;
     e.stopPropagation();
@@ -146,6 +156,9 @@ export function PlanEditor(props: Props) {
     if (drag.kind === 'device') {
       const pos = { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) };
       update((pr) => ({ ...pr, devices: pr.devices.map((d) => (d.id === drag.id ? { ...d, pos } : d)) }));
+    } else if (drag.kind === 'box') {
+      const pos = { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) };
+      update((pr) => ({ ...pr, boxPos: { ...pr.boxPos, [drag.key]: pos } }));
     } else if (drag.kind === 'panel') {
       update((pr) => ({ ...pr, panel: { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) } }));
     } else if (drag.kind === 'room') {
@@ -225,19 +238,37 @@ export function PlanEditor(props: Props) {
           );
         })}
 
-        {calc.groups.map((g) => (
-          <polyline
-            key={g.key}
-            points={g.route.map((p) => `${p.x},${p.y}`).join(' ')}
-            fill="none"
-            stroke={groupColor(g.no)}
-            strokeWidth={g.key === selectedGroupKey ? 3 : 1.5}
-            strokeDasharray={g.key === selectedGroupKey ? undefined : '6 4'}
-            opacity={selectedGroupKey && g.key !== selectedGroupKey ? 0.2 : 0.85}
-            vectorEffect="non-scaling-stroke"
-            style={{ pointerEvents: 'none' }}
-          />
-        ))}
+        {calc.groups.map((g) =>
+          g.paths.map((path, i) => (
+            <polyline
+              key={`${g.key}-${i}`}
+              points={path.map((p) => `${p.x},${p.y}`).join(' ')}
+              fill="none"
+              stroke={groupColor(g.no)}
+              strokeWidth={g.key === selectedGroupKey ? 3 : 1.5}
+              strokeDasharray={g.key === selectedGroupKey ? undefined : '6 4'}
+              opacity={selectedGroupKey && g.key !== selectedGroupKey ? 0.2 : 0.85}
+              vectorEffect="non-scaling-stroke"
+              style={{ pointerEvents: 'none' }}
+            />
+          )),
+        )}
+
+        {calc.groups.map((g) =>
+          g.boxes.map((b) => (
+            <g
+              key={b.key}
+              transform={`translate(${b.pos.x} ${b.pos.y})`}
+              className="device"
+              opacity={selectedGroupKey && g.key !== selectedGroupKey ? 0.3 : 1}
+              onPointerDown={(e) => startBox(e, b.key, b.pos, g.key)}
+            >
+              <rect x={-90} y={-90} width={180} height={180} fill="var(--surface)" stroke={groupColor(g.no)} strokeWidth={2.5} vectorEffect="non-scaling-stroke" />
+              <line x1={-90} y1={-90} x2={90} y2={90} stroke={groupColor(g.no)} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+              <title>{`Распределительная коробка, гр. ${g.no}, ${b.outlets} отв. Перетащите, чтобы перенести`}</title>
+            </g>
+          )),
+        )}
 
         {project.devices.map((d) => {
           const info = DEVICE_TYPES[d.typeKey];
@@ -246,7 +277,12 @@ export function PlanEditor(props: Props) {
           const sel = selection?.kind === 'device' && selection.id === d.id;
           const dim = selectedGroupKey && calc.groups.find((g) => g.key === selectedGroupKey)?.deviceIds.includes(d.id) === false;
           const shape =
-            info.kind === 'light' ? (
+            d.typeKey === 'switch' ? (
+              <g>
+                <circle r={R * 0.75} fill="var(--surface)" stroke={color} strokeWidth={2.5} vectorEffect="non-scaling-stroke" />
+                <line x1={R * 0.5} y1={-R * 0.5} x2={R * 1.3} y2={-R * 1.3} stroke={color} strokeWidth={2.5} vectorEffect="non-scaling-stroke" />
+              </g>
+            ) : info.kind === 'light' ? (
               <circle r={R} fill="var(--surface)" stroke={color} strokeWidth={2.5} vectorEffect="non-scaling-stroke" />
             ) : info.kind === 'socket' ? (
               <path d={`M${-R} ${R * 0.6} A${R} ${R} 0 0 1 ${R} ${R * 0.6} Z`} transform={`translate(0 ${-R * 0.3})`} fill="var(--surface)" stroke={color} strokeWidth={2.5} vectorEffect="non-scaling-stroke" />
@@ -264,7 +300,7 @@ export function PlanEditor(props: Props) {
               {sel && <circle r={R * 1.7} fill="none" stroke="var(--accent)" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
               {failedGroups.has(no) && <circle r={R * 1.35} fill="none" stroke="var(--bad)" strokeWidth={1.5} strokeDasharray="3 2" vectorEffect="non-scaling-stroke" />}
               {shape}
-              <text className="glyph" fontSize={info.glyph.length > 1 ? R * 0.85 : R * 1.05} fill={color} y={info.kind === 'socket' ? R * 0.05 : 0}>
+              <text className="glyph" fontSize={d.typeKey === 'switch' ? R * 0.6 : info.glyph.length > 1 ? R * 0.85 : R * 1.05} fill={color} y={info.kind === 'socket' ? R * 0.05 : 0}>
                 {info.glyph}
               </text>
               {no > 0 && (

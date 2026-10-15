@@ -3,6 +3,7 @@
 
 import { area, bbox, centroid, perimeter, pointInPolygon, pointOnPerimeter } from './geometry';
 import { roomTypeFromText } from './classify';
+import { nearestWallPoint } from './wall';
 import { DEVICE_TYPES } from './norms';
 import type { Device, DeviceTypeKey, Pt, Room, RoomType, SpecItem } from './types';
 
@@ -81,7 +82,7 @@ function allocate(item: SpecItem, rooms: Room[]): Map<string, number> {
     return res;
   }
 
-  if (item.typeKey === 'light') {
+  if (item.typeKey === 'light' || item.typeKey === 'switch') {
     const areas = rooms.map((r) => area(r.poly));
     if (item.qty >= rooms.length) {
       rooms.forEach((r) => add(r, 1));
@@ -128,7 +129,23 @@ const WALL_ORDER: DeviceTypeKey[] = [
   'hood', 'fridge', 'microwave', 'other', 'socket',
 ];
 
-export function autoPlace(spec: SpecItem[], rooms: Room[], panel: Pt): Device[] {
+/** Выключатель, который добавляется автоматически в помещение со светильниками. */
+export const AUTO_SWITCH: SpecItem = {
+  id: 'auto-switch',
+  name: 'Выключатель',
+  qty: 1,
+  powerW: 0,
+  typeKey: 'switch',
+  roomHint: '',
+  confidence: 1,
+};
+
+export function autoPlace(
+  spec: SpecItem[],
+  rooms: Room[],
+  panel: Pt,
+  opts: { autoSwitches?: boolean } = {},
+): Device[] {
   type Pending = { item: SpecItem; roomId: string | null };
   const perRoom = new Map<string | null, Pending[]>();
   for (const item of spec) {
@@ -143,6 +160,15 @@ export function autoPlace(spec: SpecItem[], rooms: Room[], panel: Pt): Device[] 
       const list = perRoom.get(roomId) ?? [];
       for (let k = 0; k < n; k++) list.push({ item, roomId });
       perRoom.set(roomId, list);
+    }
+  }
+
+  if (opts.autoSwitches ?? true) {
+    for (const [roomId, list] of perRoom) {
+      if (roomId == null) continue;
+      const lit = list.some((p) => p.item.typeKey === 'light');
+      const hasSwitch = list.some((p) => p.item.typeKey === 'switch');
+      if (lit && !hasSwitch) list.push({ item: AUTO_SWITCH, roomId });
     }
   }
 
@@ -163,8 +189,13 @@ export function autoPlace(spec: SpecItem[], rooms: Room[], panel: Pt): Device[] 
       list.forEach((p, i) => devices.push(make(p, { x: panel.x + 400 + i * 300, y: panel.y })));
       continue;
     }
-    const lights = list.filter((p) => DEVICE_TYPES[p.item.typeKey].kind === 'light');
+    const lights = list.filter((p) => p.item.typeKey === 'light');
     lightGrid(room, lights.length).forEach((pos, i) => devices.push(make(lights[i], pos)));
+
+    // Выключатели — у стены со стороны щита (там, откуда приходят в помещение), рядом друг с другом.
+    const switches = list.filter((p) => p.item.typeKey === 'switch');
+    const entry = nearestWallPoint(room.poly, panel, WALL_INSET);
+    switches.forEach((p, i) => devices.push(make(p, { x: entry.x + i * 250, y: entry.y })));
 
     const wall = list
       .filter((p) => DEVICE_TYPES[p.item.typeKey].kind !== 'light')

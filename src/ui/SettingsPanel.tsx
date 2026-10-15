@@ -45,6 +45,15 @@ export function SettingsPanel({ project, update }: { project: Project; update: U
           );
         })}
       </div>
+      <label className="field-inline">
+        <input
+          id="set-autoSwitches"
+          type="checkbox"
+          checked={s.autoSwitches ?? true}
+          onChange={(e) => set({ autoSwitches: e.target.checked })}
+        />
+        Ставить выключатель в каждое помещение со светом при раскладке
+      </label>
     </div>
   );
 }

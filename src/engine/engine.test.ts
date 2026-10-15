@@ -40,12 +40,30 @@ describe('автораскладка', () => {
   it('ставит все позиции и кухонные приборы на кухню', () => {
     const p = demoProject();
     const total = p.spec.reduce((s, i) => s + i.qty, 0);
-    expect(p.devices).toHaveLength(total);
+    const lit = new Set(p.devices.filter((d) => d.typeKey === 'light').map((d) => d.roomId));
+    // + по одному автоматическому выключателю в каждое помещение со светом
+    expect(p.devices).toHaveLength(total + lit.size);
     const hob = p.devices.find((d) => d.typeKey === 'hob')!;
     expect(hob.roomId).toBe('r-kitchen');
     const washer = p.devices.find((d) => d.typeKey === 'washer')!;
     expect(washer.roomId).toBe('r-bath');
     expect(p.devices.filter((d) => d.typeKey === 'light' && d.roomId === 'r-wc').length).toBeGreaterThan(0);
+  });
+
+  it('ставит по выключателю в каждое освещённое помещение, если их нет в спецификации', () => {
+    const p = demoProject();
+    const lit = new Set(p.devices.filter((d) => d.typeKey === 'light').map((d) => d.roomId));
+    const sw = p.devices.filter((d) => d.typeKey === 'switch');
+    expect(new Set(sw.map((d) => d.roomId))).toEqual(lit);
+    expect(autoPlace(p.spec, DEMO_ROOMS, p.panel, { autoSwitches: false }).some((d) => d.typeKey === 'switch')).toBe(false);
+  });
+
+  it('выключатели из спецификации не дублируются автоматическими', () => {
+    const p = demoProject();
+    const spec = parseSpecRows([['Выключатель одноклавишный', '1', '', 'Кухня'], ['Светильник', '2', '', 'Кухня']]);
+    expect(spec[0].typeKey).toBe('switch');
+    const devices = autoPlace(spec, DEMO_ROOMS, p.panel);
+    expect(devices.filter((d) => d.typeKey === 'switch')).toHaveLength(1);
   });
 
   it('без помещений ставит всё возле щита', () => {
@@ -106,6 +124,26 @@ describe('расчёт', () => {
     const calc = computeProject(moved);
     const g = calc.groups.find((x) => x.key === 'manual:1')!;
     expect(g.deviceIds).toEqual([sock.id]);
+  });
+
+  it('ставит одну распределительную коробку на помещение в группе, отдельным линиям — нет', () => {
+    const calc = computeProject(demoProject());
+    for (const g of calc.groups) {
+      if (g.kind === 'dedicated') expect(g.boxes).toHaveLength(0);
+      else expect(g.boxes).toHaveLength(g.roomNames.length);
+    }
+    const light = calc.groups.find((g) => g.kind === 'light')!;
+    expect(light.boxes.reduce((s, b) => s + b.outlets, 0)).toBe(light.deviceIds.length);
+  });
+
+  it('перенос коробки меняет длину кабеля', () => {
+    const p = demoProject();
+    const before = computeProject(p).groups.find((g) => g.kind === 'light')!;
+    const box = before.boxes[0];
+    const moved = computeProject({ ...p, boxPos: { [box.key]: { x: box.pos.x, y: box.pos.y + 8000 } } });
+    const after = moved.groups.find((g) => g.key === before.key)!;
+    expect(after.boxes[0].pos.y).toBe(box.pos.y + 8000);
+    expect(after.lengthM).toBeGreaterThan(before.lengthM);
   });
 
   it('трёхфазный ввод распределяет группы по фазам', () => {

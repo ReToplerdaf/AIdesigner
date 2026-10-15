@@ -2,6 +2,7 @@
 // Чистые функции без побочных эффектов: на вход проект, на выход полный расчёт с обоснованиями.
 
 import { centroid, manhattan } from './geometry';
+import { nearestWallPoint } from './wall';
 import {
   BREAKER_SERIES,
   CABLE_BRAND,
@@ -19,6 +20,7 @@ import type {
   Device,
   DeviceKind,
   GroupCalc,
+  JunctionBox,
   PanelCalc,
   Project,
   ProjectCalc,
@@ -30,6 +32,8 @@ import type {
 
 /** Высота установки щита, мм. */
 const PANEL_H = 1600;
+/** Коробка ставится у стены, на этом расстоянии от неё, мм. */
+const BOX_INSET = 120;
 
 const KIND_ORDER: Record<DeviceKind, number> = { light: 0, socket: 1, dedicated: 2 };
 const KIND_TITLE: Record<DeviceKind, string> = { light: 'Освещение', socket: 'Розетки', dedicated: '' };
@@ -168,8 +172,120 @@ function groupTitle(g: DraftGroup, rooms: Room[]): { title: string; roomNames: s
   return { title: `${KIND_TITLE[g.kind] || 'Группа'}: ${names.join(', ')}`, roomNames: names };
 }
 
+/**
+ * Коробка у стены со стороны, откуда приходит магистраль. Если так она встаёт вплотную к щиту
+ * (помещение со щитом), сдвигаем её к стене, ближайшей к точкам этого помещения.
+ */
+function autoBoxPos(poly: Pt[], from: Pt, devs: Device[], panel: Pt): Pt {
+  const p = nearestWallPoint(poly, from, BOX_INSET);
+  if (manhattan(p, panel) >= 700) return p;
+  const c = {
+    x: devs.reduce((s, d) => s + d.pos.x, 0) / devs.length,
+    y: devs.reduce((s, d) => s + d.pos.y, 0) / devs.length,
+  };
+  return nearestWallPoint(poly, c, BOX_INSET);
+}
+
+/** Ток потребителя, А. */
+const deviceA = (d: Device, U: number) => d.powerW / (U * DEVICE_TYPES[d.typeKey].cosPhi);
+
+/** Ветка сети: участок кабеля, точки, которые он питает, и предыдущий участок по пути от щита. */
+interface Seg {
+  lenM: number;
+  feeds: Device[];
+  parent: number;
+}
+
+/**
+ * Сеть группы. Отдельная линия — один кабель от щита до потребителя.
+ * Остальные группы: магистраль щит → коробка помещения → следующая коробка …,
+ * от каждой коробки — ответвления к точкам этого помещения.
+ */
+export function routeGroup(g: { key: string; kind: DeviceKind; devices: Device[] }, project: Project) {
+  const { panel, settings, rooms } = project;
+  const k = 1 + settings.lengthReserve;
+  const drop = (d: Device) => Math.max(settings.ceilingH - DEVICE_TYPES[d.typeKey].mountH, 0);
+  const panelRise = Math.max(settings.ceilingH - PANEL_H, 0);
+  const segs: Seg[] = [];
+  const leafOf = new Map<string, number>();
+  const paths: Pt[][] = [];
+  const boxes: JunctionBox[] = [];
+  const ordered: Device[] = [];
+  let horiz = 0;
+  let vert = 0;
+  const addSeg = (h: number, v: number, feeds: Device[], parent: number) => {
+    horiz += h;
+    vert += v;
+    segs.push({ lenM: ((h + v) / 1000) * k, feeds, parent });
+    return segs.length - 1;
+  };
+
+  // Без коробок: отдельная линия и точки вне помещений идут от щита напрямую.
+  const direct = g.kind === 'dedicated' ? g.devices : g.devices.filter((d) => !rooms.some((r) => r.id === d.roomId));
+  for (const d of direct) {
+    leafOf.set(d.id, addSeg(manhattan(panel, d.pos), panelRise + drop(d), [d], -1));
+    paths.push(orthoPath([panel, d.pos]));
+    ordered.push(d);
+  }
+
+  // Коробки: помещения в порядке обхода от щита.
+  const buckets = new Map<string, Device[]>();
+  for (const d of g.devices) {
+    if (direct.includes(d)) continue;
+    buckets.set(d.roomId!, [...(buckets.get(d.roomId!) ?? []), d]);
+  }
+  const roomOrder = routeOrder(
+    panel,
+    [...buckets.keys()].map((id) => ({ id, pos: centroid(rooms.find((r) => r.id === id)!.poly) })),
+  );
+  let prevPos = panel;
+  let prevSeg = -1;
+  roomOrder.forEach((roomId, i) => {
+    const room = rooms.find((r) => r.id === roomId)!;
+    const devs = buckets.get(roomId)!;
+    const key = `${g.key}@${roomId}`;
+    const pos = project.boxPos?.[key] ?? autoBoxPos(room.poly, prevPos, devs, panel);
+    boxes.push({ key, groupKey: g.key, roomId, pos, outlets: devs.length });
+    const downstream = roomOrder.slice(i).flatMap((id) => buckets.get(id)!);
+    const trunk = addSeg(manhattan(prevPos, pos), i === 0 ? panelRise : 0, downstream, prevSeg);
+    paths.push(orthoPath([prevPos, pos]));
+    const spokes = routeOrder(pos, devs.map((d) => ({ id: d.id, pos: d.pos }))).map((id) => devs.find((d) => d.id === id)!);
+    for (const d of spokes) {
+      leafOf.set(d.id, addSeg(manhattan(pos, d.pos), drop(d), [d], trunk));
+      paths.push(orthoPath([pos, d.pos]));
+      ordered.push(d);
+    }
+    prevPos = pos;
+    prevSeg = trunk;
+  });
+
+  const pathM = (leaf: number) => {
+    let s = 0;
+    for (let i = leaf; i >= 0; i = segs[i].parent) s += segs[i].lenM;
+    return s;
+  };
+  const maxPathM = Math.max(0, ...[...leafOf.values()].map(pathM));
+  const lengthM = Math.ceil(segs.reduce((s, x) => s + x.lenM, 0));
+
+  /** Наибольшая потеря напряжения по пути от щита до любой точки группы, %. */
+  const dropPct = (s: number, cosPhi: number, U: number) => {
+    let worst = 0;
+    for (const leaf of leafOf.values()) {
+      let sum = 0;
+      for (let i = leaf; i >= 0; i = segs[i].parent) {
+        const iA = segs[i].feeds.reduce((a, d) => a + deviceA(d, U), 0);
+        sum += voltageDropPct(segs[i].lenM, iA, cosPhi, s, U);
+      }
+      worst = Math.max(worst, sum);
+    }
+    return worst;
+  };
+
+  return { ordered, paths, boxes, lengthM, maxPathM, horizM: horiz / 1000, vertM: vert / 1000, dropPct };
+}
+
 function calcGroup(g: DraftGroup, no: number, project: Project): GroupCalc {
-  const { settings, panel, rooms } = project;
+  const { settings, rooms } = project;
   const U = settings.U;
   const trace: Trace[] = [];
   const checks: GroupCalc['checks'] = [];
@@ -203,28 +319,15 @@ function calcGroup(g: DraftGroup, no: number, project: Project): GroupCalc {
     trace.push({ what: 'УЗО', value: '30 мА', how: 'Дифавтомат вместо автомата', source: wet ? SOURCES.rcdBath : SOURCES.rcdSockets });
   }
 
-  // Трасса и длина
-  const ids = routeOrder(panel, g.devices.map((d) => ({ id: d.id, pos: d.pos })));
-  const ordered = ids.map((id) => g.devices.find((d) => d.id === id)!);
-  const route = orthoPath([panel, ...ordered.map((d) => d.pos)]);
-  // Участки трассы: до каждой точки (подъём из предыдущей точки, путь по потолку, спуск к точке)
-  const k = 1 + settings.lengthReserve;
-  const drops = ordered.map((d) => Math.max(settings.ceilingH - DEVICE_TYPES[d.typeKey].mountH, 0));
-  let horiz = 0;
-  let vert = 0;
-  const segM: number[] = ordered.map((d, i) => {
-    const prev = i === 0 ? panel : ordered[i - 1].pos;
-    const h = manhattan(prev, d.pos);
-    const v = (i === 0 ? settings.ceilingH - PANEL_H : drops[i - 1]) + drops[i];
-    horiz += h;
-    vert += v;
-    return ((h + v) / 1000) * k;
-  });
-  const lengthM = Math.ceil(segM.reduce((s, v) => s + v, 0));
+  // Трасса: щит → распределительные коробки (по одной на помещение) → ответвления к точкам
+  const net = routeGroup(g, project);
+  const { ordered, lengthM } = net;
   trace.push({
     what: 'Длина кабеля',
     value: `${lengthM} м`,
-    how: `По потолку ортогонально: ${fmt(horiz / 1000)} м по плану + ${fmt(vert / 1000)} м спусков, запас ${Math.round(settings.lengthReserve * 100)} %`,
+    how:
+      `По потолку ортогонально: ${fmt(net.horizM)} м по плану + ${fmt(net.vertM)} м спусков, запас ${Math.round(settings.lengthReserve * 100)} %` +
+      (net.boxes.length ? `; ${net.boxes.length} распред. коробок, до самой дальней точки ${fmt(net.maxPathM)} м` : ''),
   });
 
   // Сечение: по допустимому току, затем при необходимости увеличиваем по ΔU и Iкз
@@ -237,34 +340,30 @@ function calcGroup(g: DraftGroup, no: number, project: Project): GroupCalc {
   });
   const mult = INSTANT_TRIP_MULT[curve];
   const ikRequiredA = mult * breakerA;
-  // По каждому участку течёт ток всех точек, стоящих дальше по трассе.
-  const downstreamA = ordered.map((_, i) =>
-    ordered.slice(i).reduce((s, d) => s + d.powerW / (U * DEVICE_TYPES[d.typeKey].cosPhi), 0),
-  );
-  const dropPct = (s: number) =>
-    segM.reduce((sum, len, i) => sum + voltageDropPct(len, downstreamA[i], cosPhi, s, U), 0);
+  const dropPct = (s: number) => net.dropPct(s, cosPhi, U);
+  const loopLen = net.maxPathM;
   let dU = dropPct(sec.s);
-  let loop = loopImpedance(settings.zExtOhm, lengthM, sec.s);
+  let loop = loopImpedance(settings.zExtOhm, loopLen, sec.s);
   let ik = U / loop;
   while ((dU > settings.dUMaxPct || ik < ikRequiredA) && nextSection(sec.s)) {
     const reason = dU > settings.dUMaxPct ? `ΔU ${fmt(dU, 2)} % > ${settings.dUMaxPct} %` : `Iкз ${fmt(ik, 0)} А < ${ikRequiredA} А`;
     sec = nextSection(sec.s)!;
     trace.push({ what: 'Сечение увеличено', value: `${sec.s} мм²`, how: reason });
     dU = dropPct(sec.s);
-    loop = loopImpedance(settings.zExtOhm, lengthM, sec.s);
+    loop = loopImpedance(settings.zExtOhm, loopLen, sec.s);
     ik = U / loop;
   }
 
   trace.push({
     what: 'Потеря напряжения',
     value: `${fmt(dU, 2)} %`,
-    how: `Сумма по участкам: ΔU = 2·l·I·cosφ·ρ / (S·U), на каждом участке ток точек дальше по трассе; ρ = ${RHO_CU} Ом·мм²/м`,
+    how: `До самой нагруженной точки, сумма по участкам: ΔU = 2·l·I·cosφ·ρ / (S·U), на участке течёт ток всех точек за ним; ρ = ${RHO_CU} Ом·мм²/м`,
     source: SOURCES.dU,
   });
   trace.push({
     what: 'Ток КЗ в конце линии',
     value: `${fmt(ik, 0)} А`,
-    how: `Iкз = U / (Zвнеш + 2·ρ·L/S) = ${U} / (${settings.zExtOhm} + ${fmt((2 * RHO_CU * lengthM) / sec.s, 3)}); нужно ≥ ${mult}·In = ${ikRequiredA} А`,
+    how: `Iкз = U / (Zвнеш + 2·ρ·L/S) = ${U} / (${settings.zExtOhm} + ${fmt((2 * RHO_CU * loopLen) / sec.s, 3)}), L = ${fmt(loopLen)} м до дальней точки; нужно ≥ ${mult}·In = ${ikRequiredA} А`,
     source: SOURCES.loop,
   });
 
@@ -272,9 +371,10 @@ function calcGroup(g: DraftGroup, no: number, project: Project): GroupCalc {
   checks.push({ ok: dU <= settings.dUMaxPct, text: `ΔU ${fmt(dU, 2)} % ≤ ${settings.dUMaxPct} %` });
   checks.push({ ok: ik >= ikRequiredA, text: `Iкз ${fmt(ik, 0)} А ≥ ${ikRequiredA} А` });
   if (g.kind === 'socket') {
+    const n = g.devices.filter((d) => DEVICE_TYPES[d.typeKey].kind === 'socket').length;
     checks.push({
-      ok: g.devices.length <= settings.socketGroupMaxCount,
-      text: `Розеток в группе ${g.devices.length} ≤ ${settings.socketGroupMaxCount}`,
+      ok: n <= settings.socketGroupMaxCount,
+      text: `Розеток в группе ${n} ≤ ${settings.socketGroupMaxCount}`,
     });
   }
 
@@ -297,7 +397,8 @@ function calcGroup(g: DraftGroup, no: number, project: Project): GroupCalc {
     cableMark: `${CABLE_BRAND} 3×${String(sec.s).replace('.', ',')}`,
     iAllowedA: sec.iA,
     lengthM,
-    route,
+    paths: net.paths,
+    boxes: net.boxes,
     dUPct: dU,
     loopOhm: loop,
     ikA: ik,

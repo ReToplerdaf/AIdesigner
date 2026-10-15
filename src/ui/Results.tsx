@@ -212,7 +212,7 @@ export function Inspector({
             <span className="dot" style={{ background: groupColor(group.no) }} /> Группа {group.no}: {group.title}
           </h3>
           <p className="small">
-            {qf(group)} {apparatus(group)} · {group.cableMark}, {group.lengthM} м · {group.deviceIds.length} точек
+            {qf(group)} {apparatus(group)} · {group.cableMark}, {group.lengthM} м · {group.deviceIds.length} точек{group.boxes.length ? ` · ${group.boxes.length} коробок` : ''}
             {project.settings.phases === 3 ? ` · фаза L${group.phase}` : ''}
           </p>
           <Checks checks={group.checks} />
@@ -294,7 +294,7 @@ export function SingleLine({ calc, project }: { calc: ProjectCalc; project: Proj
   );
 }
 
-export function CableLog({ calc }: { calc: ProjectCalc }) {
+export function CableLog({ calc, rooms }: { calc: ProjectCalc; rooms: Project['rooms'] }) {
   const totals = new Map<string, number>();
   calc.groups.forEach((g) => totals.set(g.cableMark, (totals.get(g.cableMark) ?? 0) + g.lengthM));
   return (
@@ -323,6 +323,32 @@ export function CableLog({ calc }: { calc: ProjectCalc }) {
           </tbody>
         </table>
       </div>
+      <h3>Распределительные коробки</h3>
+      <div className="tablewrap">
+        <table className="groups">
+          <thead>
+            <tr>
+              <th>Группа</th>
+              <th>Помещение</th>
+              <th className="num">Ответвлений</th>
+            </tr>
+          </thead>
+          <tbody>
+            {calc.groups.flatMap((g) =>
+              g.boxes.map((b) => (
+                <tr key={b.key}>
+                  <td>{g.no}</td>
+                  <td className="title">{rooms.find((r) => r.id === b.roomId)?.name ?? ''}</td>
+                  <td className="num">{b.outlets}</td>
+                </tr>
+              )),
+            )}
+          </tbody>
+        </table>
+      </div>
+      <p className="small muted">
+        Всего коробок: <strong>{calc.groups.reduce((s, g) => s + g.boxes.length, 0)} шт.</strong> Коробку можно перетащить на плане.
+      </p>
       <h3>Итого кабеля</h3>
       <ul className="plain">
         {[...totals].map(([mark, len]) => (

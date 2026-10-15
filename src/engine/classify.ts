@@ -17,6 +17,7 @@ const TYPE_RULES: { key: DeviceTypeKey; re: RegExp }[] = [
   { key: 'fridge', re: /холодил|морозил/i },
   { key: 'microwave', re: /свч|микроволн/i },
   { key: 'light', re: /светильн|люстр|спот|лампа|подсветк|(?<![а-яё])бра(?![а-яё])/i },
+  { key: 'switch', re: /выключат|переключат|диммер/i },
   { key: 'socket', re: /розетк/i },
 ];
 
