@@ -42,7 +42,7 @@ export function SpecPanel({ project, update }: { project: Project; update: Updat
         const r = p.rooms.find((x) => x.type === 'hall') ?? p.rooms[0];
         panel = pointOnPerimeter(r.poly, 0.02, 300);
       }
-      return { ...p, panel, devices: autoPlace(p.spec, p.rooms, panel) };
+      return { ...p, panel, devices: autoPlace(p.spec, p.rooms, panel, { autoSwitches: p.settings.autoSwitches ?? true }) };
     });
 
   const unknown = project.spec.filter((s) => s.confidence === 0).length;

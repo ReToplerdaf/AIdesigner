@@ -129,6 +129,8 @@ textarea { width: 100%; font-family: var(--mono); font-size: 12px; resize: verti
 
 .plan { position: relative; flex: 1; min-height: 0; }
 .plan svg { width: 100%; height: 100%; display: block; background: var(--surface); touch-action: none; user-select: none; }
+.plan-layers { position: absolute; left: 12px; top: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+.plan-layers button { flex: none; padding: 6px 12px; }
 .plan-hint { position: absolute; left: 12px; bottom: 10px; background: rgba(24, 36, 44, 0.82); color: #fff; padding: 5px 10px; border-radius: 4px; font-size: 12px; pointer-events: none; }
 .room-label { text-anchor: middle; fill: var(--ink-2); font-weight: 600; pointer-events: none; }
 .room-area { text-anchor: middle; fill: var(--ink-2); pointer-events: none; opacity: 0.8; }

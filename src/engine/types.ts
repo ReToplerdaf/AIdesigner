@@ -38,6 +38,7 @@ export type DeviceTypeKey =
   | 'hood'
   | 'fridge'
   | 'microwave'
+  | 'switch'
   | 'other';
 
 export interface DeviceTypeInfo {
@@ -103,6 +104,8 @@ export interface Settings {
   socketGroupMaxCount: number;
   /** Предел мощности группы освещения, Вт. */
   lightGroupMaxW: number;
+  /** Ставить выключатель в каждое помещение со светильниками, если в спецификации их не хватает. */
+  autoSwitches?: boolean;
 }
 
 export interface PlanImage {
@@ -122,6 +125,8 @@ export interface Project {
   panel: Pt;
   settings: Settings;
   image: PlanImage | null;
+  /** Ручные положения распределительных коробок: ключ «группа@помещение» → точка. */
+  boxPos?: Record<string, Pt>;
 }
 
 /** Строка обоснования: что посчитано, по какой формуле, откуда норма. */
@@ -153,14 +158,26 @@ export interface GroupCalc {
   cableMark: string;
   iAllowedA: number;
   lengthM: number;
-  /** Трасса для отрисовки: щит → точки. */
-  route: Pt[];
+  /** Трассы для отрисовки: щит → коробки (магистраль) и коробка → точка (ответвления). */
+  paths: Pt[][];
+  /** Распределительные коробки группы: по одной на каждое помещение. */
+  boxes: JunctionBox[];
   dUPct: number;
   loopOhm: number;
   ikA: number;
   ikRequiredA: number;
   checks: { ok: boolean; text: string }[];
   trace: Trace[];
+}
+
+export interface JunctionBox {
+  /** «ключ группы@id помещения» — по нему хранится ручное положение. */
+  key: string;
+  groupKey: string;
+  roomId: string;
+  pos: Pt;
+  /** Сколько точек подключено к коробке. */
+  outlets: number;
 }
 
 export interface PanelCalc {
