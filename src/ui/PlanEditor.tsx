@@ -14,6 +14,7 @@ interface Props {
   tool: Tool;
   onCalibrate: (a: Pt, b: Pt) => void;
   onRoomDrawn: (poly: Pt[]) => void;
+  onTool: (t: Tool) => void;
   fitSignal: number;
 }
 
@@ -38,6 +39,15 @@ const LAYERS: { key: Layer; label: string }[] = [
   { key: 'power', label: 'Розетки и линии' },
 ];
 const MUTED = '#c4cad0';
+const TOOLS: { key: Tool; label: string; icon: JSX.Element }[] = [
+  { key: 'select', label: 'Выбор и перемещение', icon: <path d="M5 3l13 7-6 1.5L9.5 18z" /> },
+  {
+    key: 'calibrate',
+    label: 'Масштаб: два клика по отрезку известной длины',
+    icon: <path d="M3 15l12-12 6 6-12 12zM7 11l2 2M10 8l2 2M13 5l2 2" />,
+  },
+  { key: 'room', label: 'Помещение: растяните прямоугольник', icon: <path d="M4 4h16v16H4zM4 12h6M14 4v6" /> },
+];
 const layerOf = (kind: DeviceKind): Layer => (kind === 'light' ? 'light' : 'power');
 const ROOM_FILL: Record<Room['type'], string> = {
   kitchen: '#fff4e6',
@@ -442,6 +452,15 @@ export function PlanEditor(props: Props) {
           <circle key={i} cx={p.x} cy={p.y} r={unit * 5} fill="var(--accent)" />
         ))}
       </svg>
+      <div className="plan-tools">
+        {TOOLS.map((t) => (
+          <button key={t.key} id={`tool-${t.key}`} className={tool === t.key ? 'on' : ''} title={t.label} onClick={() => props.onTool(t.key)}>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round">
+              {t.icon}
+            </svg>
+          </button>
+        ))}
+      </div>
       <div className="seg plan-layers">
         {LAYERS.map((l) => (
           <button key={l.key} id={`layer-${l.key}`} className={layer === l.key ? 'on' : ''} onClick={() => chooseLayer(l.key)}>

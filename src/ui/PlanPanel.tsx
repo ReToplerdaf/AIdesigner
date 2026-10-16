@@ -65,31 +65,32 @@ export function PlanPanel(props: Props) {
         </div>
       </section>
 
-      <section className="stack-s">
-        <h3>Инструмент</h3>
-        <div className="seg">
-          <button className={tool === 'select' ? 'on' : ''} onClick={() => setTool('select')}>Выбор</button>
-          <button className={tool === 'calibrate' ? 'on' : ''} onClick={() => setTool('calibrate')}>Масштаб</button>
-          <button className={tool === 'room' ? 'on' : ''} onClick={() => setTool('room')}>Помещение</button>
-        </div>
-        {props.pendingCalibration != null && (
-          <form
-            className="calib"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const v = +(new FormData(e.currentTarget).get('len') as string);
-              if (v > 0) props.applyCalibration(v);
-            }}
-          >
-            <span>Отрезок сейчас {fmt(props.pendingCalibration, 0)} мм. Реальная длина:</span>
-            <div className="row">
-              <input id="calib-len" name="len" type="number" min={1} autoFocus placeholder="мм" />
-              <button className="btn primary" type="submit">Применить</button>
-              <button className="btn ghost" type="button" onClick={props.cancelCalibration}>Отмена</button>
-            </div>
-          </form>
-        )}
-      </section>
+      {(tool !== 'select' || props.pendingCalibration != null) && (
+        <section className="stack-s">
+          <h3>{tool === 'room' ? 'Инструмент: помещение' : 'Инструмент: масштаб'}</h3>
+          {tool === 'room' && <p className="muted small">Растяните на плане прямоугольник помещения. Esc — вернуться к выбору.</p>}
+          {tool === 'calibrate' && props.pendingCalibration == null && (
+            <p className="muted small">Кликните на плане две точки отрезка, длина которого известна. Esc — отмена.</p>
+          )}
+          {props.pendingCalibration != null && (
+            <form
+              className="calib"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const v = +(new FormData(e.currentTarget).get('len') as string);
+                if (v > 0) props.applyCalibration(v);
+              }}
+            >
+              <span>Отрезок сейчас {fmt(props.pendingCalibration, 0)} мм. Реальная длина:</span>
+              <div className="row">
+                <input id="calib-len" name="len" type="number" min={1} autoFocus placeholder="мм" />
+                <button className="btn primary" type="submit">Применить</button>
+                <button className="btn ghost" type="button" onClick={props.cancelCalibration}>Отмена</button>
+              </div>
+            </form>
+          )}
+        </section>
+      )}
 
       <section className="stack-s">
         <h3>Добавить на план</h3>
@@ -114,7 +115,7 @@ export function PlanPanel(props: Props) {
 
       <section className="stack-s">
         <h3>Помещения ({project.rooms.length})</h3>
-        {project.rooms.length === 0 && <p className="muted small">Выберите «Помещение» и обведите комнаты на плане.</p>}
+        {project.rooms.length === 0 && <p className="muted small">Выберите инструмент «Помещение» в левом верхнем углу плана и обведите комнаты.</p>}
         <div className="rooms">
           {project.rooms.map((r) => (
             <div
