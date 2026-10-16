@@ -1,6 +1,7 @@
 import { parseSpecRows } from '../engine/classify';
 import { rect } from '../engine/geometry';
-import { autoPlace } from '../engine/placement';
+import { autoPlace, withPassageSpec } from '../engine/placement';
+import { pruneUnusedHoles } from '../engine/calc';
 import type { Project, Room, Settings } from '../engine/types';
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -47,12 +48,23 @@ export const DEMO_SPEC_TEXT = [
 export function demoProject(): Project {
   const spec = parseSpecRows(DEMO_SPEC_TEXT.split('\n').map((l) => l.split('\t')));
   const panel = { x: 300, y: 4250 };
+  const draft: Project = {
+    version: 1,
+    name: '',
+    rooms: DEMO_ROOMS,
+    spec,
+    devices: autoPlace(spec, DEMO_ROOMS, panel),
+    panel,
+    settings: { ...DEFAULT_SETTINGS },
+    image: null,
+  };
+  const { devices } = pruneUnusedHoles(draft);
   return {
     version: 1,
     name: 'Демо: двухкомнатная квартира',
     rooms: DEMO_ROOMS,
-    spec,
-    devices: autoPlace(spec, DEMO_ROOMS, panel),
+    spec: withPassageSpec(spec, devices),
+    devices,
     panel,
     settings: { ...DEFAULT_SETTINGS },
     image: null,

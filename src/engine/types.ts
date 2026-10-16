@@ -22,8 +22,11 @@ export interface Room {
   poly: Pt[];
 }
 
-/** Как потребитель подключается: в общую розеточную группу, в группу освещения или отдельной линией. */
-export type DeviceKind = 'socket' | 'light' | 'dedicated';
+/**
+ * Как потребитель подключается: в общую розеточную группу, в группу освещения или отдельной линией.
+ * 'none' — не электрический объект (проходное отверстие): есть в спецификации и на плане, но не в расчёте.
+ */
+export type DeviceKind = 'socket' | 'light' | 'dedicated' | 'none';
 
 export type DeviceTypeKey =
   | 'socket'
@@ -39,6 +42,7 @@ export type DeviceTypeKey =
   | 'fridge'
   | 'microwave'
   | 'switch'
+  | 'passage'
   | 'other';
 
 export interface DeviceTypeInfo {
@@ -127,8 +131,6 @@ export interface Project {
   image: PlanImage | null;
   /** Ручные положения распределительных коробок: ключ «группа@помещение» → точка. */
   boxPos?: Record<string, Pt>;
-  /** Ручные положения проходов в стенах: ключ «помещение|помещение» → точка (прижимается к стене). */
-  passPos?: Record<string, Pt>;
 }
 
 /** Строка обоснования: что посчитано, по какой формуле, откуда норма. */
@@ -201,10 +203,12 @@ export interface ProjectCalc {
   passages: PassageCalc[];
 }
 
-/** Общее отверстие в стене между двумя помещениями. */
+/** Проходное отверстие в стене (точка на плане с типом «проход»). */
 export interface PassageCalc {
+  /** id точки отверстия. */
   key: string;
-  rooms: [string, string];
+  /** Помещения по обе стороны стены; null — отверстие не у стены между помещениями. */
+  rooms: [string, string] | null;
   pos: Pt;
   /** Участок стены, вдоль которого отверстие можно двигать. */
   a: Pt;

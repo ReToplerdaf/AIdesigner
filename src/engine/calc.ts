@@ -3,7 +3,7 @@
 
 import { centroid, manhattan } from './geometry';
 import { nearestWallPoint } from './wall';
-import { findPassages, passRoute, pathVia, polyLen, WALL_PENALTY, type Passage } from './passages';
+import { passRoute, pathVia, polyLen, resolveHoles, WALL_PENALTY, type Passage } from './passages';
 import { roomAt } from './placement';
 import {
   BREAKER_SERIES,
@@ -38,8 +38,8 @@ const PANEL_H = 1600;
 /** Коробка ставится у стены, на этом расстоянии от неё, мм. */
 const BOX_INSET = 120;
 
-const KIND_ORDER: Record<DeviceKind, number> = { light: 0, socket: 1, dedicated: 2 };
-const KIND_TITLE: Record<DeviceKind, string> = { light: 'Освещение', socket: 'Розетки', dedicated: '' };
+const KIND_ORDER: Record<DeviceKind, number> = { light: 0, socket: 1, dedicated: 2, none: 3 };
+const KIND_TITLE: Record<DeviceKind, string> = { light: 'Освещение', socket: 'Розетки', dedicated: '', none: '' };
 
 const fmt = (v: number, d = 1) => v.toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: d });
 
@@ -102,7 +102,9 @@ function roomOf(d: Device, rooms: Room[]): Room | undefined {
 
 /** Автоматическое формирование групп. Устройства с ручным groupKey присоединяются после. */
 export function buildGroups(project: Project): DraftGroup[] {
-  const { devices, rooms, panel, settings } = project;
+  const { rooms, panel, settings } = project;
+  // Не электрические объекты (проходные отверстия) в группы не входят.
+  const devices = project.devices.filter((d) => DEVICE_TYPES[d.typeKey].kind !== 'none');
   const groups: DraftGroup[] = [];
   const auto = devices.filter((d) => !d.groupKey);
 
@@ -207,14 +209,17 @@ interface Seg {
 export function routeGroup(
   g: { key: string; kind: DeviceKind; devices: Device[] },
   project: Project,
-  passages: Passage[] = findPassages(project.rooms, project.passPos),
+  passages: Passage[] = holesOf(project).passages,
 ) {
   const { panel, settings, rooms } = project;
   const panelRoom = roomAt(panel, rooms);
   const crossed: string[] = [];
+  /** Переходы между помещениями, для которых нет отверстия в стене. */
+  const noHole: [string, string][] = [];
   /** Трасса между точками разных помещений — через общие проходы в стенах. */
   const via = (a: Pt, ra: string | null, b: Pt, rb: string | null) => {
     const route = passRoute(a, ra, b, rb, passages);
+    if (ra && rb && ra !== rb && !route.length) noHole.push([ra, rb]);
     crossed.push(...route.map((p) => p.key));
     const pts = pathVia(a, route, b);
     paths.push(pts);
@@ -318,7 +323,7 @@ export function routeGroup(
     return worst;
   };
 
-  return { ordered, paths, boxes, crossed, lengthM, maxPathM, horizM: horiz / 1000, vertM: vert / 1000, dropPct };
+  return { ordered, paths, boxes, crossed, noHole, lengthM, maxPathM, horizM: horiz / 1000, vertM: vert / 1000, dropPct };
 }
 
 function calcGroup(g: DraftGroup, no: number, project: Project, passages: Passage[]): GroupCalc {
@@ -416,6 +421,12 @@ function calcGroup(g: DraftGroup, no: number, project: Project, passages: Passag
     });
   }
 
+  const roomName = (id: string) => rooms.find((r) => r.id === id)?.name ?? id;
+  const missing = [...new Set(net.noHole.map(([a, b]) => [roomName(a), roomName(b)].sort().join(' — ')))];
+  if (missing.length) {
+    checks.push({ ok: false, text: `Нет проходного отверстия в стене: ${missing.join('; ')}` });
+  }
+
   const { title, roomNames } = groupTitle(g, rooms);
   return {
     key: g.key,
@@ -503,12 +514,24 @@ function calcPanel(groups: GroupCalc[], loads: [number, number, number], setting
   return { installedW: installed, designW: design, currentA: current, inputBreakerA, phaseLoadsW: loads, checks, trace };
 }
 
+/** Проходные отверстия проекта: точки с типом «проход», прижатые к стенам между помещениями. */
+export function holesOf(project: Project) {
+  const holes = project.devices.filter((d) => d.typeKey === 'passage');
+  return resolveHoles(holes, project.rooms);
+}
+
+/** Убрать автоматически поставленные отверстия, через которые не идёт ни один кабель. */
+export function pruneUnusedHoles(project: Project): Project {
+  const used = new Set(computeProject(project).passages.filter((w) => w.cables > 0).map((w) => w.key));
+  return { ...project, devices: project.devices.filter((d) => d.typeKey !== 'passage' || used.has(d.id)) };
+}
+
 export function computeProject(project: Project): ProjectCalc {
   const drafts = buildGroups(project);
-  const walls = findPassages(project.rooms, project.passPos);
+  const { passages: walls, loose } = holesOf(project);
   const groups = drafts.map((g, i) => calcGroup(g, i + 1, project, walls));
   const loads = assignPhases(groups, project.settings);
-  return { groups, panel: calcPanel(groups, loads, project.settings), passages: calcPassages(walls, groups) };
+  return { groups, panel: calcPanel(groups, loads, project.settings), passages: calcPassages(walls, loose, groups) };
 }
 
 /** Ориентировочный наружный диаметр кабеля ВВГнг(А)-LS 3×S, мм. */
@@ -517,14 +540,13 @@ const CABLE_OD: Record<number, number> = { 1.5: 9.4, 2.5: 10.4, 4: 12.1, 6: 13.3
 const SLEEVES = [16, 20, 25, 32, 40, 50, 63, 75, 90, 110];
 
 /**
- * Используемые проходы: сколько кабелей идёт через отверстие и какая нужна гильза.
+ * Проходные отверстия: сколько кабелей идёт через каждое и какая нужна гильза.
  * Гильза подбирается с заполнением сечения кабелями не более 40 %.
  */
-export function calcPassages(walls: Passage[], groups: GroupCalc[]): PassageCalc[] {
+export function calcPassages(walls: Passage[], loose: { id: string; pos: Pt }[], groups: GroupCalc[]): PassageCalc[] {
   const out: PassageCalc[] = [];
   for (const w of walls) {
     const users = groups.flatMap((g) => g.passages.filter((k) => k === w.key).map(() => g));
-    if (!users.length) continue;
     const sumD2 = users.reduce((s, g) => s + (CABLE_OD[g.sectionMm2] ?? 20) ** 2, 0);
     const inner = Math.sqrt(sumD2 / 0.4);
     const sleeve = SLEEVES.find((d) => d * 0.8 >= inner) ?? SLEEVES[SLEEVES.length - 1];
@@ -537,8 +559,11 @@ export function calcPassages(walls: Passage[], groups: GroupCalc[]): PassageCalc
       vertical: w.vertical,
       cables: users.length,
       groupNos: [...new Set(users.map((g) => g.no))],
-      sleeveMm: sleeve,
+      sleeveMm: users.length ? sleeve : 0,
     });
+  }
+  for (const h of loose) {
+    out.push({ key: h.id, rooms: null, pos: h.pos, a: h.pos, b: h.pos, vertical: false, cables: 0, groupNos: [], sleeveMm: 0 });
   }
   return out;
 }
