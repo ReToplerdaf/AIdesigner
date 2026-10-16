@@ -339,6 +339,33 @@ export function CableLog({ calc, rooms }: { calc: ProjectCalc; rooms: Project['r
       <p className="small muted">
         Всего коробок: <strong>{calc.groups.reduce((s, g) => s + g.boxes.length, 0)} шт.</strong> Коробку можно перетащить на плане.
       </p>
+      <h3>Проходы в стенах</h3>
+      <div className="tablewrap">
+        <table className="groups">
+          <thead>
+            <tr>
+              <th>Стена</th>
+              <th className="num">Кабелей</th>
+              <th>Группы</th>
+              <th className="num">Гильза, мм</th>
+            </tr>
+          </thead>
+          <tbody>
+            {calc.passages.map((w) => (
+              <tr key={w.key}>
+                <td className="title">{w.rooms.map((id) => rooms.find((r) => r.id === id)?.name ?? id).join(' — ')}</td>
+                <td className="num">{w.cables}</td>
+                <td>{w.groupNos.join(', ')}</td>
+                <td className="num">Ø{w.sleeveMm}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="small muted">
+        Одно отверстие на стену между помещениями, через него идут все кабели. Отверстие можно перетащить вдоль стены. Гильза
+        ориентировочная: заполнение не более 40 %.
+      </p>
       <h3>Итого кабеля</h3>
       <ul className="plain">
         {[...totals].map(([mark, len]) => (
