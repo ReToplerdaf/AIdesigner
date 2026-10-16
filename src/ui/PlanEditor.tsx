@@ -346,8 +346,9 @@ export function PlanEditor(props: Props) {
           const color = off ? MUTED : no ? groupColor(no) : '#868e96';
           const sel = selection?.kind === 'device' && selection.id === d.id;
           const dim = selectedGroupKey && calc.groups.find((g) => g.key === selectedGroupKey)?.deviceIds.includes(d.id) === false;
-          // Розетки и приборы — спиной к ближайшей стене своего помещения.
-          const room = info.kind !== 'light' ? project.rooms.find((r) => r.id === d.roomId) : undefined;
+          // Розетки, приборы и выключатели — спиной к ближайшей стене своего помещения.
+          const onWall = info.kind !== 'light' || d.typeKey === 'switch';
+          const room = onWall ? project.rooms.find((r) => r.id === d.roomId) : undefined;
           const angle = room ? wallAngle(room.poly, d.pos) : 0;
           const shape =
             d.typeKey === 'switch' ? (
