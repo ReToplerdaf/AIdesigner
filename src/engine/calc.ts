@@ -3,6 +3,8 @@
 
 import { centroid, manhattan } from './geometry';
 import { nearestWallPoint } from './wall';
+import { findPassages, passRoute, pathVia, polyLen, WALL_PENALTY, type Passage } from './passages';
+import { roomAt } from './placement';
 import {
   BREAKER_SERIES,
   CABLE_BRAND,
@@ -22,6 +24,7 @@ import type {
   GroupCalc,
   JunctionBox,
   PanelCalc,
+  PassageCalc,
   Project,
   ProjectCalc,
   Pt,
@@ -201,8 +204,22 @@ interface Seg {
  * Остальные группы: магистраль щит → коробка помещения → следующая коробка …,
  * от каждой коробки — ответвления к точкам этого помещения.
  */
-export function routeGroup(g: { key: string; kind: DeviceKind; devices: Device[] }, project: Project) {
+export function routeGroup(
+  g: { key: string; kind: DeviceKind; devices: Device[] },
+  project: Project,
+  passages: Passage[] = findPassages(project.rooms, project.passPos),
+) {
   const { panel, settings, rooms } = project;
+  const panelRoom = roomAt(panel, rooms);
+  const crossed: string[] = [];
+  /** Трасса между точками разных помещений — через общие проходы в стенах. */
+  const via = (a: Pt, ra: string | null, b: Pt, rb: string | null) => {
+    const route = passRoute(a, ra, b, rb, passages);
+    crossed.push(...route.map((p) => p.key));
+    const pts = pathVia(a, route, b);
+    paths.push(pts);
+    return { len: polyLen(pts), route };
+  };
   const k = 1 + settings.lengthReserve;
   const drop = (d: Device) => Math.max(settings.ceilingH - DEVICE_TYPES[d.typeKey].mountH, 0);
   const panelRise = Math.max(settings.ceilingH - PANEL_H, 0);
@@ -223,41 +240,61 @@ export function routeGroup(g: { key: string; kind: DeviceKind; devices: Device[]
   // Без коробок: отдельная линия и точки вне помещений идут от щита напрямую.
   const direct = g.kind === 'dedicated' ? g.devices : g.devices.filter((d) => !rooms.some((r) => r.id === d.roomId));
   for (const d of direct) {
-    leafOf.set(d.id, addSeg(manhattan(panel, d.pos), panelRise + drop(d), [d], -1));
-    paths.push(orthoPath([panel, d.pos]));
+    leafOf.set(d.id, addSeg(via(panel, panelRoom, d.pos, d.roomId).len, panelRise + drop(d), [d], -1));
     ordered.push(d);
   }
 
-  // Коробки: помещения в порядке обхода от щита.
+  // Коробки: по одной на помещение. Магистраль — дерево от щита: каждое следующее помещение
+  // подключается к ближайшей уже поставленной коробке (с учётом штрафа за проход через стену),
+  // поэтому трасса не возвращается через уже пройденные помещения.
   const buckets = new Map<string, Device[]>();
   for (const d of g.devices) {
     if (direct.includes(d)) continue;
     buckets.set(d.roomId!, [...(buckets.get(d.roomId!) ?? []), d]);
   }
-  const roomOrder = routeOrder(
-    panel,
-    [...buckets.keys()].map((id) => ({ id, pos: centroid(rooms.find((r) => r.id === id)!.poly) })),
-  );
-  let prevPos = panel;
-  let prevSeg = -1;
-  roomOrder.forEach((roomId, i) => {
+  type Node = { roomId: string | null; pos: Pt; parent: number; devs: Device[]; key: string };
+  const nodes: Node[] = [{ roomId: panelRoom, pos: panel, parent: -1, devs: [], key: '' }];
+  const left = [...buckets.keys()];
+  while (left.length) {
+    let best: { ni: number; roomId: string; entry: Pt; cost: number } | null = null;
+    for (let ni = 0; ni < nodes.length; ni++) {
+      // От щита уходит один кабель группы: щит может питать только первую коробку.
+      if (ni === 0 && nodes.length > 1) continue;
+      const n = nodes[ni];
+      for (const roomId of left) {
+        const room = rooms.find((r) => r.id === roomId)!;
+        const target = project.boxPos?.[`${g.key}@${roomId}`] ?? centroid(room.poly);
+        const route = passRoute(n.pos, n.roomId, target, roomId, passages);
+        const cost = polyLen(pathVia(n.pos, route, target)) + route.length * WALL_PENALTY;
+        if (!best || cost < best.cost) best = { ni, roomId, entry: route.at(-1)?.pos ?? n.pos, cost };
+      }
+    }
+    const { ni, roomId, entry } = best!;
     const room = rooms.find((r) => r.id === roomId)!;
     const devs = buckets.get(roomId)!;
     const key = `${g.key}@${roomId}`;
-    const pos = project.boxPos?.[key] ?? autoBoxPos(room.poly, prevPos, devs, panel);
-    boxes.push({ key, groupKey: g.key, roomId, pos, outlets: devs.length });
-    const downstream = roomOrder.slice(i).flatMap((id) => buckets.get(id)!);
-    const trunk = addSeg(manhattan(prevPos, pos), i === 0 ? panelRise : 0, downstream, prevSeg);
-    paths.push(orthoPath([prevPos, pos]));
-    const spokes = routeOrder(pos, devs.map((d) => ({ id: d.id, pos: d.pos }))).map((id) => devs.find((d) => d.id === id)!);
+    // Коробку без ручного положения ставим у стены, через которую магистраль входит в помещение.
+    const pos = project.boxPos?.[key] ?? autoBoxPos(room.poly, entry, devs, panel);
+    nodes.push({ roomId, pos, parent: ni, devs, key });
+    left.splice(left.indexOf(roomId), 1);
+  }
+  // Что питает участок магистрали: точки своего помещения и всех помещений дальше по дереву.
+  const sub = nodes.map((n) => [...n.devs]);
+  for (let i = nodes.length - 1; i > 0; i--) if (nodes[i].parent > 0) sub[nodes[i].parent].push(...sub[i]);
+  const segOf: number[] = [-1];
+  for (let i = 1; i < nodes.length; i++) {
+    const n = nodes[i];
+    const from = nodes[n.parent];
+    boxes.push({ key: n.key, groupKey: g.key, roomId: n.roomId!, pos: n.pos, outlets: n.devs.length });
+    const trunk = addSeg(via(from.pos, from.roomId, n.pos, n.roomId).len, n.parent === 0 ? panelRise : 0, sub[i], segOf[n.parent]);
+    segOf.push(trunk);
+    const spokes = routeOrder(n.pos, n.devs.map((d) => ({ id: d.id, pos: d.pos }))).map((id) => n.devs.find((d) => d.id === id)!);
     for (const d of spokes) {
-      leafOf.set(d.id, addSeg(manhattan(pos, d.pos), drop(d), [d], trunk));
-      paths.push(orthoPath([pos, d.pos]));
+      leafOf.set(d.id, addSeg(manhattan(n.pos, d.pos), drop(d), [d], trunk));
+      paths.push(orthoPath([n.pos, d.pos]));
       ordered.push(d);
     }
-    prevPos = pos;
-    prevSeg = trunk;
-  });
+  }
 
   const pathM = (leaf: number) => {
     let s = 0;
@@ -281,10 +318,10 @@ export function routeGroup(g: { key: string; kind: DeviceKind; devices: Device[]
     return worst;
   };
 
-  return { ordered, paths, boxes, lengthM, maxPathM, horizM: horiz / 1000, vertM: vert / 1000, dropPct };
+  return { ordered, paths, boxes, crossed, lengthM, maxPathM, horizM: horiz / 1000, vertM: vert / 1000, dropPct };
 }
 
-function calcGroup(g: DraftGroup, no: number, project: Project): GroupCalc {
+function calcGroup(g: DraftGroup, no: number, project: Project, passages: Passage[]): GroupCalc {
   const { settings, rooms } = project;
   const U = settings.U;
   const trace: Trace[] = [];
@@ -320,14 +357,15 @@ function calcGroup(g: DraftGroup, no: number, project: Project): GroupCalc {
   }
 
   // Трасса: щит → распределительные коробки (по одной на помещение) → ответвления к точкам
-  const net = routeGroup(g, project);
+  const net = routeGroup(g, project, passages);
   const { ordered, lengthM } = net;
   trace.push({
     what: 'Длина кабеля',
     value: `${lengthM} м`,
     how:
       `По потолку ортогонально: ${fmt(net.horizM)} м по плану + ${fmt(net.vertM)} м спусков, запас ${Math.round(settings.lengthReserve * 100)} %` +
-      (net.boxes.length ? `; ${net.boxes.length} распред. коробок, до самой дальней точки ${fmt(net.maxPathM)} м` : ''),
+      (net.boxes.length ? `; ${net.boxes.length} распред. коробок, до самой дальней точки ${fmt(net.maxPathM)} м` : '') +
+      (net.crossed.length ? `; ${net.crossed.length} проход(а) через стены по общим отверстиям` : ''),
   });
 
   // Сечение: по допустимому току, затем при необходимости увеличиваем по ΔU и Iкз
@@ -399,6 +437,7 @@ function calcGroup(g: DraftGroup, no: number, project: Project): GroupCalc {
     lengthM,
     paths: net.paths,
     boxes: net.boxes,
+    passages: net.crossed,
     dUPct: dU,
     loopOhm: loop,
     ikA: ik,
@@ -466,7 +505,40 @@ function calcPanel(groups: GroupCalc[], loads: [number, number, number], setting
 
 export function computeProject(project: Project): ProjectCalc {
   const drafts = buildGroups(project);
-  const groups = drafts.map((g, i) => calcGroup(g, i + 1, project));
+  const walls = findPassages(project.rooms, project.passPos);
+  const groups = drafts.map((g, i) => calcGroup(g, i + 1, project, walls));
   const loads = assignPhases(groups, project.settings);
-  return { groups, panel: calcPanel(groups, loads, project.settings) };
+  return { groups, panel: calcPanel(groups, loads, project.settings), passages: calcPassages(walls, groups) };
+}
+
+/** Ориентировочный наружный диаметр кабеля ВВГнг(А)-LS 3×S, мм. */
+const CABLE_OD: Record<number, number> = { 1.5: 9.4, 2.5: 10.4, 4: 12.1, 6: 13.3, 10: 16.4, 16: 18.6 };
+/** Гильзы (трубы) для прохода через стену, наружный диаметр, мм. */
+const SLEEVES = [16, 20, 25, 32, 40, 50, 63, 75, 90, 110];
+
+/**
+ * Используемые проходы: сколько кабелей идёт через отверстие и какая нужна гильза.
+ * Гильза подбирается с заполнением сечения кабелями не более 40 %.
+ */
+export function calcPassages(walls: Passage[], groups: GroupCalc[]): PassageCalc[] {
+  const out: PassageCalc[] = [];
+  for (const w of walls) {
+    const users = groups.flatMap((g) => g.passages.filter((k) => k === w.key).map(() => g));
+    if (!users.length) continue;
+    const sumD2 = users.reduce((s, g) => s + (CABLE_OD[g.sectionMm2] ?? 20) ** 2, 0);
+    const inner = Math.sqrt(sumD2 / 0.4);
+    const sleeve = SLEEVES.find((d) => d * 0.8 >= inner) ?? SLEEVES[SLEEVES.length - 1];
+    out.push({
+      key: w.key,
+      rooms: w.rooms,
+      pos: w.pos,
+      a: w.a,
+      b: w.b,
+      vertical: w.vertical,
+      cables: users.length,
+      groupNos: [...new Set(users.map((g) => g.no))],
+      sleeveMm: sleeve,
+    });
+  }
+  return out;
 }

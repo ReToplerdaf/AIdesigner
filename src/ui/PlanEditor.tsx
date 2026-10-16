@@ -23,6 +23,7 @@ type Drag =
   | { kind: 'device'; id: string; dx: number; dy: number }
   | { kind: 'panel'; dx: number; dy: number }
   | { kind: 'box'; key: string; dx: number; dy: number }
+  | { kind: 'pass'; key: string; dx: number; dy: number }
   | { kind: 'pan'; start: Pt; view: View; inv: DOMMatrix }
   | { kind: 'room'; start: Pt }
   | null;
@@ -167,6 +168,14 @@ export function PlanEditor(props: Props) {
     setSelection({ kind: 'group', key: groupKey });
   };
 
+  const startPass = (e: React.PointerEvent, key: string, pos: Pt) => {
+    if (tool !== 'select' || e.button !== 0) return;
+    e.stopPropagation();
+    svgRef.current!.setPointerCapture(e.pointerId);
+    const p = toSvg(e.clientX, e.clientY);
+    setDrag({ kind: 'pass', key, dx: pos.x - p.x, dy: pos.y - p.y });
+  };
+
   const startPanel = (e: React.PointerEvent) => {
     if (tool !== 'select' || e.button !== 0) return;
     e.stopPropagation();
@@ -190,6 +199,10 @@ export function PlanEditor(props: Props) {
     } else if (drag.kind === 'box') {
       const pos = { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) };
       update((pr) => ({ ...pr, boxPos: { ...pr.boxPos, [drag.key]: pos } }));
+    } else if (drag.kind === 'pass') {
+      // Положение прижимается к стене в расчёте, здесь храним точку курсора.
+      const pos = { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) };
+      update((pr) => ({ ...pr, passPos: { ...pr.passPos, [drag.key]: pos } }));
     } else if (drag.kind === 'panel') {
       update((pr) => ({ ...pr, panel: { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) } }));
     } else if (drag.kind === 'room') {
@@ -302,6 +315,27 @@ export function PlanEditor(props: Props) {
               <title>{`Распределительная коробка, гр. ${g.no}, ${b.outlets} отв. Перетащите, чтобы перенести`}</title>
             </g>
           ));
+        })}
+
+        {calc.passages.map((w) => {
+          const name = w.rooms.map((id) => project.rooms.find((r) => r.id === id)?.name ?? id).join(' — ');
+          const len = 300;
+          return (
+            <g key={w.key} transform={`translate(${w.pos.x} ${w.pos.y})`} className="device" onPointerDown={(e) => startPass(e, w.key, w.pos)}>
+              <rect
+                x={w.vertical ? -len / 2 : -110}
+                y={w.vertical ? -110 : -len / 2}
+                width={w.vertical ? len : 220}
+                height={w.vertical ? 220 : len}
+                rx={40}
+                fill="var(--ink)"
+              />
+              <text className="glyph" fontSize={150} fill="var(--surface)">
+                {w.cables}
+              </text>
+              <title>{`Проход в стене ${name}: ${w.cables} кабелей (гр. ${w.groupNos.join(', ')}), гильза Ø${w.sleeveMm} мм. Перетащите вдоль стены`}</title>
+            </g>
+          );
         })}
 
         {byLayer(project.devices, (d) => DEVICE_TYPES[d.typeKey].kind).map((d) => {

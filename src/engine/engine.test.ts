@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { classifyName, parsePowerW, parseSpecRows, splitText } from './classify';
 import { computeProject, pickBreaker, pickSection, voltageDropPct } from './calc';
 import { autoPlace, distribute } from './placement';
+import { findPassages, passageKey } from './passages';
 import { demoProject, DEMO_ROOMS, DEMO_SPEC_TEXT } from '../data/demo';
 
 describe('классификация спецификации', () => {
@@ -142,7 +143,7 @@ describe('расчёт', () => {
     const box = before.boxes[0];
     const moved = computeProject({ ...p, boxPos: { [box.key]: { x: box.pos.x, y: box.pos.y + 8000 } } });
     const after = moved.groups.find((g) => g.key === before.key)!;
-    expect(after.boxes[0].pos.y).toBe(box.pos.y + 8000);
+    expect(after.boxes.find((b) => b.key === box.key)!.pos.y).toBe(box.pos.y + 8000);
     expect(after.lengthM).toBeGreaterThan(before.lengthM);
   });
 
@@ -151,5 +152,49 @@ describe('расчёт', () => {
     p.settings = { ...p.settings, phases: 3, pAllowedW: 15000 };
     const calc = computeProject(p);
     expect(new Set(calc.groups.map((g) => g.phase)).size).toBe(3);
+  });
+
+  it('находит общие стены между смежными помещениями', () => {
+    const walls = findPassages(DEMO_ROOMS);
+    const keys = walls.map((w) => w.key);
+    expect(keys).toContain(passageKey('r-kitchen', 'r-hall'));
+    expect(keys).toContain(passageKey('r-kitchen', 'r-living'));
+    // Кухня и спальня не соприкасаются.
+    expect(keys).not.toContain(passageKey('r-kitchen', 'r-bedroom'));
+    const kh = walls.find((w) => w.key === passageKey('r-kitchen', 'r-hall'))!;
+    expect(kh.vertical).toBe(false);
+    expect(kh.pos.y).toBe(3500);
+  });
+
+  it('все кабели между помещениями идут через одно отверстие в стене', () => {
+    const calc = computeProject(demoProject());
+    const kh = calc.passages.find((p) => p.key === passageKey('r-kitchen', 'r-hall'))!;
+    // Через стену прихожая/кухня идут кухонные линии: розетки, варочная, духовка, ПММ и свет.
+    expect(kh.cables).toBeGreaterThanOrEqual(5);
+    for (const g of calc.groups) {
+      for (const path of g.paths) {
+        // Каждый участок, пересекающий линию y = 3500 в пределах кухни, проходит ровно через отверстие.
+        for (let i = 1; i < path.length; i++) {
+          const a = path[i - 1];
+          const b = path[i];
+          const crosses = a.x === b.x && a.x < 3500 && Math.min(a.y, b.y) < 3500 && Math.max(a.y, b.y) > 3500;
+          if (crosses) expect(a.x).toBe(kh.pos.x);
+        }
+      }
+    }
+    expect(kh.sleeveMm).toBeGreaterThanOrEqual(32);
+  });
+
+  it('перенос отверстия вдоль стены прижимает его к стене', () => {
+    const p = demoProject();
+    const key = passageKey('r-kitchen', 'r-hall');
+    const calc = computeProject({ ...p, passPos: { [key]: { x: 1000, y: 3900 } } });
+    const kh = calc.passages.find((x) => x.key === key)!;
+    expect(kh.pos).toEqual({ x: 1000, y: 3500 });
+  });
+
+  it('магистраль группы не проходит через одну стену дважды', () => {
+    const calc = computeProject(demoProject());
+    for (const g of calc.groups) expect(new Set(g.passages).size).toBe(g.passages.length);
   });
 });

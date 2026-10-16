@@ -127,6 +127,8 @@ export interface Project {
   image: PlanImage | null;
   /** Ручные положения распределительных коробок: ключ «группа@помещение» → точка. */
   boxPos?: Record<string, Pt>;
+  /** Ручные положения проходов в стенах: ключ «помещение|помещение» → точка (прижимается к стене). */
+  passPos?: Record<string, Pt>;
 }
 
 /** Строка обоснования: что посчитано, по какой формуле, откуда норма. */
@@ -162,6 +164,8 @@ export interface GroupCalc {
   paths: Pt[][];
   /** Распределительные коробки группы: по одной на каждое помещение. */
   boxes: JunctionBox[];
+  /** Через какие проходы в стенах идут кабели группы (ключ прохода на каждый кабель). */
+  passages: string[];
   dUPct: number;
   loopOhm: number;
   ikA: number;
@@ -193,4 +197,22 @@ export interface PanelCalc {
 export interface ProjectCalc {
   groups: GroupCalc[];
   panel: PanelCalc;
+  /** Используемые проходы в стенах. */
+  passages: PassageCalc[];
+}
+
+/** Общее отверстие в стене между двумя помещениями. */
+export interface PassageCalc {
+  key: string;
+  rooms: [string, string];
+  pos: Pt;
+  /** Участок стены, вдоль которого отверстие можно двигать. */
+  a: Pt;
+  b: Pt;
+  vertical: boolean;
+  /** Сколько кабелей проходит через отверстие. */
+  cables: number;
+  groupNos: number[];
+  /** Ориентировочный диаметр гильзы, мм. */
+  sleeveMm: number;
 }
