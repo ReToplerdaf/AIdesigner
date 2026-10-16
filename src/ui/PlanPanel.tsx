@@ -1,8 +1,8 @@
 import { area } from '../engine/geometry';
-import { ROOM_TYPES } from '../engine/norms';
+import { DEVICE_TYPES, ROOM_TYPES } from '../engine/norms';
 import { roomTypeFromText } from '../engine/classify';
 import type { Project, RoomType } from '../engine/types';
-import { fmt, type Selection, type Tool, type Update } from './state';
+import { DRAG_MIME, fmt, type Selection, type Tool, type Update } from './state';
 
 interface Props {
   project: Project;
@@ -65,35 +65,57 @@ export function PlanPanel(props: Props) {
         </div>
       </section>
 
+      {(tool !== 'select' || props.pendingCalibration != null) && (
+        <section className="stack-s">
+          <h3>{tool === 'room' ? 'Инструмент: помещение' : 'Инструмент: масштаб'}</h3>
+          {tool === 'room' && <p className="muted small">Растяните на плане прямоугольник помещения. Esc — вернуться к выбору.</p>}
+          {tool === 'calibrate' && props.pendingCalibration == null && (
+            <p className="muted small">Кликните на плане две точки отрезка, длина которого известна. Esc — отмена.</p>
+          )}
+          {props.pendingCalibration != null && (
+            <form
+              className="calib"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const v = +(new FormData(e.currentTarget).get('len') as string);
+                if (v > 0) props.applyCalibration(v);
+              }}
+            >
+              <span>Отрезок сейчас {fmt(props.pendingCalibration, 0)} мм. Реальная длина:</span>
+              <div className="row">
+                <input id="calib-len" name="len" type="number" min={1} autoFocus placeholder="мм" />
+                <button className="btn primary" type="submit">Применить</button>
+                <button className="btn ghost" type="button" onClick={props.cancelCalibration}>Отмена</button>
+              </div>
+            </form>
+          )}
+        </section>
+      )}
+
       <section className="stack-s">
-        <h3>Инструмент</h3>
-        <div className="seg">
-          <button className={tool === 'select' ? 'on' : ''} onClick={() => setTool('select')}>Выбор</button>
-          <button className={tool === 'calibrate' ? 'on' : ''} onClick={() => setTool('calibrate')}>Масштаб</button>
-          <button className={tool === 'room' ? 'on' : ''} onClick={() => setTool('room')}>Помещение</button>
+        <h3>Добавить на план</h3>
+        <p className="muted small">Перетащите прибор на план. Позиции из спецификации можно тянуть со вкладки «Спецификация».</p>
+        <div className="palette">
+          {Object.values(DEVICE_TYPES).map((t) => (
+            <span
+              key={t.key}
+              className="chip"
+              draggable
+              title={`${t.label}, ${fmt(t.defaultPowerW / 1000, 2)} кВт`}
+              onDragStart={(e) => {
+                e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ typeKey: t.key }));
+                e.dataTransfer.effectAllowed = 'copy';
+              }}
+            >
+              <b>{t.glyph}</b> {t.label}
+            </span>
+          ))}
         </div>
-        {props.pendingCalibration != null && (
-          <form
-            className="calib"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const v = +(new FormData(e.currentTarget).get('len') as string);
-              if (v > 0) props.applyCalibration(v);
-            }}
-          >
-            <span>Отрезок сейчас {fmt(props.pendingCalibration, 0)} мм. Реальная длина:</span>
-            <div className="row">
-              <input id="calib-len" name="len" type="number" min={1} autoFocus placeholder="мм" />
-              <button className="btn primary" type="submit">Применить</button>
-              <button className="btn ghost" type="button" onClick={props.cancelCalibration}>Отмена</button>
-            </div>
-          </form>
-        )}
       </section>
 
       <section className="stack-s">
         <h3>Помещения ({project.rooms.length})</h3>
-        {project.rooms.length === 0 && <p className="muted small">Выберите «Помещение» и обведите комнаты на плане.</p>}
+        {project.rooms.length === 0 && <p className="muted small">Выберите инструмент «Помещение» в левом верхнем углу плана и обведите комнаты.</p>}
         <div className="rooms">
           {project.rooms.map((r) => (
             <div

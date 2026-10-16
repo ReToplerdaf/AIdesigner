@@ -3,8 +3,8 @@ import { area, bbox, centroid, rect } from '../engine/geometry';
 import { DEVICE_TYPES } from '../engine/norms';
 import { roomAt } from '../engine/placement';
 import { wallAngle } from '../engine/wall';
-import type { DeviceKind, Project, ProjectCalc, Pt, Room } from '../engine/types';
-import { fmt, groupColor, type Selection, type Tool, type Update } from './state';
+import type { Device, DeviceKind, DeviceTypeKey, Project, ProjectCalc, Pt, Room } from '../engine/types';
+import { DRAG_MIME, fmt, groupColor, type DragPayload, type Selection, type Tool, type Update } from './state';
 
 interface Props {
   project: Project;
@@ -15,6 +15,7 @@ interface Props {
   tool: Tool;
   onCalibrate: (a: Pt, b: Pt) => void;
   onRoomDrawn: (poly: Pt[]) => void;
+  onTool: (t: Tool) => void;
   fitSignal: number;
 }
 
@@ -30,6 +31,7 @@ type Drag =
   | null;
 
 const R = 140;
+let dropSeq = 0;
 
 /** Слой плана: всё сразу, только освещение (светильники и выключатели) или только силовая часть. */
 type Layer = 'all' | 'light' | 'power';
@@ -39,6 +41,15 @@ const LAYERS: { key: Layer; label: string }[] = [
   { key: 'power', label: 'Розетки и линии' },
 ];
 const MUTED = '#c4cad0';
+const TOOLS: { key: Tool; label: string; icon: JSX.Element }[] = [
+  { key: 'select', label: 'Выбор и перемещение', icon: <path d="M5 3l13 7-6 1.5L9.5 18z" /> },
+  {
+    key: 'calibrate',
+    label: 'Масштаб: два клика по отрезку известной длины',
+    icon: <path d="M3 15l12-12 6 6-12 12zM7 11l2 2M10 8l2 2M13 5l2 2" />,
+  },
+  { key: 'room', label: 'Помещение: растяните прямоугольник', icon: <path d="M4 4h16v16H4zM4 12h6M14 4v6" /> },
+];
 const layerOf = (kind: DeviceKind): Layer => (kind === 'light' ? 'light' : 'power');
 const ROOM_FILL: Record<Room['type'], string> = {
   kitchen: '#fff4e6',
@@ -69,6 +80,7 @@ export function PlanEditor(props: Props) {
   const [drag, setDrag] = useState<Drag>(null);
   const [preview, setPreview] = useState<Pt[] | null>(null);
   const [calPts, setCalPts] = useState<Pt[]>([]);
+  const [dropping, setDropping] = useState(false);
   const [layer, setLayer] = useState<Layer>(() => {
     try {
       return (localStorage.getItem('aid-layer') as Layer) || 'all';
@@ -226,11 +238,58 @@ export function PlanEditor(props: Props) {
     setDrag(null);
   };
 
+  const removeDevice = (id: string) => {
+    update((pr) => ({ ...pr, devices: pr.devices.filter((d) => d.id !== id) }));
+    setSelection(null);
+  };
+
+  const canDrop = (e: React.DragEvent) => e.dataTransfer.types.includes(DRAG_MIME);
+  const onDrop = (e: React.DragEvent) => {
+    setDropping(false);
+    if (!canDrop(e)) return;
+    e.preventDefault();
+    let data: DragPayload;
+    try {
+      data = JSON.parse(e.dataTransfer.getData(DRAG_MIME));
+    } catch {
+      return;
+    }
+    const p = toSvg(e.clientX, e.clientY);
+    const pos = { x: Math.round(p.x), y: Math.round(p.y) };
+    const id = `d${Date.now().toString(36)}m${(dropSeq++).toString(36)}`;
+    update((pr) => {
+      let dev: Device;
+      if ('specId' in data) {
+        const item = pr.spec.find((x) => x.id === data.specId);
+        if (!item) return pr;
+        dev = { id, specId: item.id, typeKey: item.typeKey, label: item.name, powerW: item.powerW, roomId: roomAt(pos, pr.rooms), pos };
+      } else {
+        const t = DEVICE_TYPES[data.typeKey as DeviceTypeKey];
+        if (!t) return pr;
+        dev = { id, specId: 'manual', typeKey: t.key, label: t.label, powerW: t.defaultPowerW, roomId: roomAt(pos, pr.rooms), pos };
+      }
+      return { ...pr, devices: [...pr.devices, dev] };
+    });
+    setSelection({ kind: 'device', id });
+  };
+
   const unit = view.w / 1000; // примерно мм на пиксель при ширине окна ~1000 px
   const cursor = tool === 'select' ? (drag?.kind === 'pan' ? 'grabbing' : 'grab') : 'crosshair';
 
   return (
-    <div className="plan">
+    <div
+      className={`plan${dropping ? ' dropping' : ''}`}
+      onDragOver={(e) => {
+        if (!canDrop(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        if (!dropping) setDropping(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropping(false);
+      }}
+      onDrop={onDrop}
+    >
       <svg
         ref={svgRef}
         viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
@@ -384,6 +443,20 @@ export function PlanEditor(props: Props) {
                 </text>
               )}
               <title>{`${d.label}, ${fmt(d.powerW / 1000, 2)} кВт${no ? `, гр. ${no}` : ''}`}</title>
+              {sel && !off && (
+                <g
+                  className="del-handle"
+                  transform={`translate(${R * 1.2 + unit * 9} ${R * 0.6 + unit * 9})`}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    removeDevice(d.id);
+                  }}
+                >
+                  <circle r={unit * 9} fill="var(--ink-2)" />
+                  <path d={`M${-unit * 3.5} ${-unit * 3.5}L${unit * 3.5} ${unit * 3.5}M${unit * 3.5} ${-unit * 3.5}L${-unit * 3.5} ${unit * 3.5}`} stroke="#fff" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+                  <title>Удалить с плана (Delete)</title>
+                </g>
+              )}
             </g>
           );
         })}
@@ -418,6 +491,15 @@ export function PlanEditor(props: Props) {
           <circle key={i} cx={p.x} cy={p.y} r={unit * 5} fill="var(--accent)" />
         ))}
       </svg>
+      <div className="plan-tools">
+        {TOOLS.map((t) => (
+          <button key={t.key} id={`tool-${t.key}`} className={tool === t.key ? 'on' : ''} title={t.label} onClick={() => props.onTool(t.key)}>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round">
+              {t.icon}
+            </svg>
+          </button>
+        ))}
+      </div>
       <div className="seg plan-layers">
         {LAYERS.map((l) => (
           <button key={l.key} id={`layer-${l.key}`} className={layer === l.key ? 'on' : ''} onClick={() => chooseLayer(l.key)}>
@@ -426,7 +508,7 @@ export function PlanEditor(props: Props) {
         ))}
       </div>
       <div className="plan-hint">
-        {tool === 'select' && 'Перетаскивайте точки и щит. Колесо — масштаб, перетаскивание фона — сдвиг.'}
+        {tool === 'select' && 'Тащите точки по плану или приборы из списка слева. × или Delete удаляет. Колесо — масштаб.'}
         {tool === 'calibrate' && (calPts.length === 0 ? 'Кликните первую точку известного размера' : 'Кликните вторую точку')}
         {tool === 'room' && 'Растяните прямоугольник помещения'}
       </div>

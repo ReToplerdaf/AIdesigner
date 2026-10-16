@@ -92,6 +92,15 @@ textarea { width: 100%; font-family: var(--mono); font-size: 12px; resize: verti
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button.on { background: var(--accent); color: #fff; }
 
+.palette { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 12px; font-size: 12px; cursor: grab; background: var(--surface); user-select: none; }
+.chip:hover { border-color: var(--accent); }
+.chip b { font-family: var(--mono); color: var(--ink-2); font-size: 11px; }
+.placed { color: var(--ink-2); }
+.placed.full { color: var(--ok); }
+.plan.dropping svg { outline: 2px dashed var(--accent); outline-offset: -4px; }
+.del-handle { cursor: pointer; }
+.del-handle:hover circle { fill: var(--bad); }
 .calib { display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--accent-soft); border-radius: 4px; font-size: 13px; }
 .calib input { width: 100px; }
 
@@ -102,6 +111,8 @@ textarea { width: 100%; font-family: var(--mono); font-size: 12px; resize: verti
 
 .spec-head { font-size: 13px; }
 .spec-list { display: flex; flex-direction: column; gap: 6px; }
+.spec-name.drag { cursor: grab; }
+.grip { color: var(--ink-2); font-weight: 400; }
 .spec-item { border: 1px solid var(--line); border-radius: 4px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .spec-item.unknown { border-color: var(--bad); }
 .spec-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -117,21 +128,30 @@ textarea { width: 100%; font-family: var(--mono); font-size: 12px; resize: verti
 .field-inline input { width: 80px; }
 .field-inline select { max-width: 280px; }
 
+.center { position: relative; }
 .summary {
-  display: flex; gap: 0; background: var(--surface); border: 0; border-bottom: 1px solid var(--line);
-  padding: 0; cursor: pointer; text-align: left; flex-wrap: wrap;
+  position: absolute; right: 12px; bottom: 10px; z-index: 1;
+  display: flex; flex-direction: column; gap: 1px;
+  background: none; border: 0; padding: 0; cursor: pointer; text-align: left;
+  font-size: 11px; color: var(--ink-2); opacity: 0.7;
 }
-.summary > div { display: flex; flex-direction: column; padding: 8px 16px; border-right: 1px solid var(--line); }
-.summary .k { font-size: 11px; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em; }
-.summary .v { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.summary:hover { opacity: 1; }
+.summary > div { display: grid; grid-template-columns: 58px auto; gap: 4px; }
+.summary .v { font-variant-numeric: tabular-nums; color: var(--ink); }
 .summary .bad .v { color: var(--bad); }
 .summary .ok .v { color: var(--ok); }
 
 .plan { position: relative; flex: 1; min-height: 0; }
 .plan svg { width: 100%; height: 100%; display: block; background: var(--surface); touch-action: none; user-select: none; }
-.plan-layers { position: absolute; left: 12px; top: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+.plan-tools { position: absolute; left: 12px; top: 10px; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+.plan-tools button { display: grid; place-items: center; width: 34px; height: 34px; border: 0; background: none; cursor: pointer; color: var(--ink-2); }
+.plan-tools button + button { border-top: 1px solid var(--line); }
+.plan-tools button:hover { color: var(--ink); background: #f4f7f8; }
+.plan-tools button.on { background: var(--accent); color: #fff; }
+.plan .plan-tools svg { width: 18px; height: 18px; background: none; }
+.plan-layers { position: absolute; left: 58px; top: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
 .plan-layers button { flex: none; padding: 6px 12px; }
-.plan-hint { position: absolute; left: 12px; bottom: 10px; background: rgba(24, 36, 44, 0.82); color: #fff; padding: 5px 10px; border-radius: 4px; font-size: 12px; pointer-events: none; }
+.plan-hint { position: absolute; left: 12px; bottom: 10px; max-width: calc(100% - 180px); background: rgba(24, 36, 44, 0.82); color: #fff; padding: 5px 10px; border-radius: 4px; font-size: 12px; pointer-events: none; }
 .room-label { text-anchor: middle; fill: var(--ink-2); font-weight: 600; pointer-events: none; }
 .room-area { text-anchor: middle; fill: var(--ink-2); pointer-events: none; opacity: 0.8; }
 .device { cursor: move; }

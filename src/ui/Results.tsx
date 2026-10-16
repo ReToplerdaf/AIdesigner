@@ -37,32 +37,22 @@ function TraceList({ trace }: { trace: Trace[] }) {
 export function PanelSummary({ calc, project, onSelect }: { calc: ProjectCalc; project: Project; onSelect: () => void }) {
   const p = calc.panel;
   const bad = calc.groups.filter((g) => g.checks.some((c) => !c.ok)).length + p.checks.filter((c) => !c.ok).length;
+  const rows: [string, string, string, string?][] = [
+    ['Ру', `${fmt(p.installedW / 1000, 1)} кВт`, 'Установленная мощность'],
+    ['Рр', `${fmt(p.designW / 1000, 1)} кВт`, 'Расчётная мощность с учётом коэффициента спроса'],
+    ['Iр', `${fmt(p.currentA, 1)} А`, 'Расчётный ток на вводе'],
+    ['Ввод', `C${p.inputBreakerA}${project.settings.phases === 3 ? ' 3P' : ''}`, 'Вводной автомат'],
+    ['Групп', String(calc.groups.length), 'Число групп в щите'],
+    ['Проверки', bad ? `${bad} ✕` : 'все ✓', 'Проверки по нормам. Нажмите, чтобы открыть расчёт щита', bad ? 'bad' : 'ok'],
+  ];
   return (
-    <button className="summary" onClick={onSelect}>
-      <div>
-        <span className="k">Ру</span>
-        <span className="v">{fmt(p.installedW / 1000, 1)} кВт</span>
-      </div>
-      <div>
-        <span className="k">Рр</span>
-        <span className="v">{fmt(p.designW / 1000, 1)} кВт</span>
-      </div>
-      <div>
-        <span className="k">Iр</span>
-        <span className="v">{fmt(p.currentA, 1)} А</span>
-      </div>
-      <div>
-        <span className="k">Ввод</span>
-        <span className="v">C{p.inputBreakerA}{project.settings.phases === 3 ? ' 3P' : ''}</span>
-      </div>
-      <div>
-        <span className="k">Групп</span>
-        <span className="v">{calc.groups.length}</span>
-      </div>
-      <div className={bad ? 'bad' : 'ok'}>
-        <span className="k">Проверки</span>
-        <span className="v">{bad ? `${bad} ✕` : 'все ✓'}</span>
-      </div>
+    <button className="summary" onClick={onSelect} title="Сводка по щиту. Нажмите, чтобы открыть расчёт щита">
+      {rows.map(([k, v, hint, cls]) => (
+        <div key={k} className={cls} title={hint}>
+          <span className="k">{k}</span>
+          <span className="v">{v}</span>
+        </div>
+      ))}
     </button>
   );
 }
