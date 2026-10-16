@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { parseSpecRows, splitText } from '../engine/classify';
 import { DEVICE_TYPES } from '../engine/norms';
-import { autoPlace, matchRooms, roomAt } from '../engine/placement';
+import { pruneUnusedHoles } from '../engine/calc';
+import { autoPlace, matchRooms, roomAt, withPassageSpec } from '../engine/placement';
 import { pointOnPerimeter } from '../engine/geometry';
 import type { DeviceTypeKey, SpecItem } from '../engine/types';
 import { DEMO_SPEC_TEXT } from '../data/demo';
@@ -49,7 +50,9 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
         const r = p.rooms.find((x) => x.type === 'hall') ?? p.rooms[0];
         panel = pointOnPerimeter(r.poly, 0.02, 300);
       }
-      return { ...p, panel, devices: autoPlace(p.spec, p.rooms, panel, { autoSwitches: p.settings.autoSwitches ?? true }) };
+      const all = autoPlace(p.spec, p.rooms, panel, { autoSwitches: p.settings.autoSwitches ?? true });
+      const { devices } = pruneUnusedHoles({ ...p, panel, devices: all });
+      return { ...p, panel, devices, spec: withPassageSpec(p.spec, devices) };
     });
 
   // Прибор, выбранный на плане: его позиция поднимается наверх списка, внизу плашки — удаление точки.
@@ -78,7 +81,8 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
   );
 
   const unknown = project.spec.filter((s) => s.confidence === 0).length;
-  const total = project.spec.reduce((s, i) => s + i.qty, 0);
+  const holes = project.devices.filter((d) => d.typeKey === 'passage').length;
+  const total = project.spec.reduce((s, i) => s + (i.typeKey === 'passage' ? holes : i.qty), 0);
 
   return (
     <div className="stack">
@@ -127,7 +131,10 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
             )}
             {ordered.map((s) => {
               const rooms = matchRooms(s.roomHint, project.rooms);
-              const placed = project.devices.filter((d) => d.specId === s.id).length;
+              const isHole = s.typeKey === 'passage';
+              const placed = isHole
+                ? project.devices.filter((d) => d.typeKey === 'passage').length
+                : project.devices.filter((d) => d.specId === s.id).length;
               return (
                 <div key={s.id} className={`spec-item${s.confidence === 0 ? ' unknown' : ''}${s === pickedSpec ? ' sel' : ''}`}>
                   <div
@@ -147,7 +154,7 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
                         <option key={t.key} value={t.key}>{t.label}</option>
                       ))}
                     </select>
-                    <input id={`q-${s.id}`} type="number" min={1} value={s.qty} title="Количество" onChange={(e) => edit(s.id, { qty: Math.max(1, +e.target.value || 1) })} />
+                    <input id={`q-${s.id}`} type="number" min={1} value={isHole ? placed : s.qty} disabled={isHole} title={isHole ? 'Столько отверстий стоит на плане' : 'Количество'} onChange={(e) => edit(s.id, { qty: Math.max(1, +e.target.value || 1) })} />
                     <span className="unit">шт</span>
                     <input id={`p-${s.id}`} type="number" step={0.1} min={0} value={s.powerW / 1000} title="Мощность одной единицы, кВт" onChange={(e) => edit(s.id, { powerW: Math.round((+e.target.value || 0) * 1000) })} />
                     <span className="unit">кВт</span>
@@ -160,7 +167,13 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
                       ))}
                     </select>
                     <span className="muted small">
-                      {fmt((s.powerW * s.qty) / 1000, 2)} кВт · <span className={`placed${placed >= s.qty ? ' full' : ''}`}>на плане {placed} из {s.qty}</span>
+                      {isHole ? (
+                        'без нагрузки, в расчёт не входит'
+                      ) : (
+                        <>
+                          {fmt((s.powerW * s.qty) / 1000, 2)} кВт · <span className={`placed${placed >= s.qty ? ' full' : ''}`}>на плане {placed} из {s.qty}</span>
+                        </>
+                      )}
                     </span>
                   </div>
                   {s === pickedSpec && pickedFooter}

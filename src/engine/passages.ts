@@ -1,5 +1,5 @@
-// Проходы в стенах: одно общее отверстие на стену между двумя помещениями.
-// Все кабели из помещения в помещение идут через него, а не пробивают стену каждый в своём месте.
+// Проходы в стенах: общие отверстия в стенах между помещениями. Отверстие — объект спецификации
+// и точка на плане без электрической нагрузки; все кабели из помещения в помещение идут через отверстия.
 
 import { manhattan } from './geometry';
 import type { Pt, Room } from './types';
@@ -17,7 +17,7 @@ const CORNER_MARGIN = 150;
 export const WALL_PENALTY = 2500;
 
 export interface Passage {
-  /** «id1|id2» в алфавитном порядке. */
+  /** id отверстия (точки на плане) или «id1|id2» для прохода по умолчанию. */
   key: string;
   rooms: [string, string];
   /** Точка отверстия на оси стены. */
@@ -72,35 +72,78 @@ export function snapToWall(p: Pick<Passage, 'a' | 'b' | 'vertical'>, want?: Pt):
   return { x: r(x), y: r(p.a.y) };
 }
 
-/** Все возможные проходы: по одному на каждую пару смежных помещений (по самому длинному общему участку). */
-export function findPassages(rooms: Room[], manual: Record<string, Pt> = {}): Passage[] {
-  const out: Passage[] = [];
+/** Общий участок стены между двумя помещениями (по оси стены). */
+export interface Wall {
+  rooms: [string, string];
+  a: Pt;
+  b: Pt;
+  vertical: boolean;
+}
+
+/** Все общие участки стен между помещениями (у пары помещений их может быть несколько). */
+export function sharedWalls(rooms: Room[]): Wall[] {
+  const out: Wall[] = [];
   for (let i = 0; i < rooms.length; i++) {
     for (let j = i + 1; j < rooms.length; j++) {
-      let best: ReturnType<typeof shared> = null;
-      let bestLen = 0;
       for (const e1 of edges(rooms[i].poly)) {
         for (const e2 of edges(rooms[j].poly)) {
           const s = shared(e1, e2);
-          if (s && manhattan(s.a, s.b) > bestLen) {
-            best = s;
-            bestLen = manhattan(s.a, s.b);
-          }
+          if (s) out.push({ ...s, rooms: [rooms[i].id, rooms[j].id].sort() as [string, string] });
         }
       }
-      if (!best) continue;
-      const key = passageKey(rooms[i].id, rooms[j].id);
-      out.push({
-        key,
-        rooms: [rooms[i].id, rooms[j].id].sort() as [string, string],
-        a: best.a,
-        b: best.b,
-        vertical: best.vertical,
-        pos: snapToWall(best, manual[key]),
-      });
     }
   }
   return out;
+}
+
+/** Все возможные проходы по умолчанию: по одному на пару смежных помещений, посередине самого длинного общего участка. */
+export function findPassages(rooms: Room[]): Passage[] {
+  const best = new Map<string, Wall>();
+  for (const w of sharedWalls(rooms)) {
+    const key = passageKey(w.rooms[0], w.rooms[1]);
+    const cur = best.get(key);
+    if (!cur || manhattan(w.a, w.b) > manhattan(cur.a, cur.b)) best.set(key, w);
+  }
+  return [...best].map(([key, w]) => ({ key, ...w, pos: snapToWall(w) }));
+}
+
+/** Отверстие прилипает к стене, если до её оси не больше этого, мм. */
+const HOLE_SNAP = 700;
+
+const segDist = (p: Pt, w: Wall) =>
+  w.vertical
+    ? Math.abs(p.x - w.a.x) + Math.max(0, w.a.y - p.y, p.y - w.b.y)
+    : Math.abs(p.y - w.a.y) + Math.max(0, w.a.x - p.x, p.x - w.b.x);
+
+/** Ближайшая к точке общая стена и точка отверстия на ней; null — рядом нет стены между помещениями. */
+export function snapHole(p: Pt, walls: Wall[]): { wall: Wall; pos: Pt } | null {
+  let best: Wall | null = null;
+  let bestD = HOLE_SNAP;
+  for (const w of walls) {
+    const d = segDist(p, w);
+    if (d <= bestD) {
+      best = w;
+      bestD = d;
+    }
+  }
+  return best ? { wall: best, pos: snapToWall(best, p) } : null;
+}
+
+/**
+ * Проходы из отверстий, расставленных на плане (точки с типом «проход»).
+ * Каждое отверстие прилипает к ближайшей общей стене; отверстия не у стены между помещениями
+ * в трассировке не участвуют и возвращаются отдельно.
+ */
+export function resolveHoles(holes: { id: string; pos: Pt }[], rooms: Room[]) {
+  const walls = sharedWalls(rooms);
+  const passages: Passage[] = [];
+  const loose: { id: string; pos: Pt }[] = [];
+  for (const h of holes) {
+    const s = snapHole(h.pos, walls);
+    if (s) passages.push({ key: h.id, ...s.wall, pos: s.pos });
+    else loose.push(h);
+  }
+  return { passages, loose };
 }
 
 /**

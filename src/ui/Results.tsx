@@ -160,7 +160,32 @@ export function Inspector({
 
   return (
     <div className="stack-s">
-      {device && (
+      {device && device.typeKey === 'passage' && (
+        <div className="device-card">
+          <h3>{device.label}</h3>
+          {(() => {
+            const w = calc.passages.find((x) => x.key === device.id);
+            if (!w?.rooms) return <p className="small bad">Отверстие не стоит на стене между помещениями. Перетащите его на стену.</p>;
+            return (
+              <p className="small">
+                {w.rooms.map((id) => project.rooms.find((r) => r.id === id)?.name ?? id).join(' — ')} · кабелей {w.cables}
+                {w.cables ? ` (гр. ${w.groupNos.join(', ')}) · гильза Ø${w.sleeveMm} мм` : ''}
+              </p>
+            );
+          })()}
+          <p className="small muted">Не участвует в электрическом расчёте. Перетащите на другую стену, чтобы кабели пошли через неё.</p>
+          <button
+            className="btn ghost small"
+            onClick={() => {
+              update((p) => ({ ...p, devices: p.devices.filter((d) => d.id !== device.id) }));
+              setSelection(null);
+            }}
+          >
+            Удалить отверстие
+          </button>
+        </div>
+      )}
+      {device && device.typeKey !== 'passage' && (
         <div className="device-card">
           <h3>{device.label}</h3>
           <p className="small muted">{DEVICE_TYPES[device.typeKey].label} · {project.rooms.find((r) => r.id === device.roomId)?.name ?? 'вне помещений'}</p>
@@ -353,18 +378,21 @@ export function CableLog({ calc, rooms }: { calc: ProjectCalc; rooms: Project['r
           <tbody>
             {calc.passages.map((w) => (
               <tr key={w.key}>
-                <td className="title">{w.rooms.map((id) => rooms.find((r) => r.id === id)?.name ?? id).join(' — ')}</td>
+                <td className={`title${w.rooms ? '' : ' bad'}`}>
+                  {w.rooms ? w.rooms.map((id) => rooms.find((r) => r.id === id)?.name ?? id).join(' — ') : 'не на стене между помещениями'}
+                </td>
                 <td className="num">{w.cables}</td>
-                <td>{w.groupNos.join(', ')}</td>
-                <td className="num">Ø{w.sleeveMm}</td>
+                <td>{w.groupNos.join(', ') || '—'}</td>
+                <td className="num">{w.sleeveMm ? `Ø${w.sleeveMm}` : '—'}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
       <p className="small muted">
-        Одно отверстие на стену между помещениями, через него идут все кабели. Отверстие можно перетащить вдоль стены. Гильза
-        ориентировочная: заполнение не более 40 %.
+        Всего отверстий: <strong>{calc.passages.length} шт.</strong> Кабели между помещениями идут только через отверстия.
+        Отверстие — позиция спецификации без нагрузки: его можно перетащить на любую стену, удалить или добавить из списка.
+        Гильза ориентировочная: заполнение не более 40 %.
       </p>
       <h3>Итого кабеля</h3>
       <ul className="plain">

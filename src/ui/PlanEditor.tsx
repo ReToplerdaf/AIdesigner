@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { area, bbox, centroid, rect } from '../engine/geometry';
 import { DEVICE_TYPES } from '../engine/norms';
-import { roomAt } from '../engine/placement';
+import { AUTO_PASSAGE, roomAt, withPassageSpec } from '../engine/placement';
 import { wallAngle } from '../engine/wall';
+import { sharedWalls, snapHole } from '../engine/passages';
 import type { Device, DeviceKind, DeviceTypeKey, Project, ProjectCalc, Pt, Room } from '../engine/types';
 import { DRAG_MIME, fmt, groupColor, type DragPayload, type Selection, type Tool, type Update } from './state';
 
@@ -27,7 +28,6 @@ type Drag =
   | { kind: 'device'; id: string; dx: number; dy: number }
   | { kind: 'panel'; dx: number; dy: number }
   | { kind: 'box'; key: string; dx: number; dy: number }
-  | { kind: 'pass'; key: string; dx: number; dy: number }
   | { kind: 'pan'; start: Pt; view: View; inv: DOMMatrix }
   | { kind: 'room'; start: Pt }
   | null;
@@ -184,14 +184,6 @@ export function PlanEditor(props: Props) {
     setSelection({ kind: 'group', key: groupKey });
   };
 
-  const startPass = (e: React.PointerEvent, key: string, pos: Pt) => {
-    if (tool !== 'select' || e.button !== 0) return;
-    e.stopPropagation();
-    svgRef.current!.setPointerCapture(e.pointerId);
-    const p = toSvg(e.clientX, e.clientY);
-    setDrag({ kind: 'pass', key, dx: pos.x - p.x, dy: pos.y - p.y });
-  };
-
   const startPanel = (e: React.PointerEvent) => {
     if (tool !== 'select' || e.button !== 0) return;
     e.stopPropagation();
@@ -215,10 +207,6 @@ export function PlanEditor(props: Props) {
     } else if (drag.kind === 'box') {
       const pos = { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) };
       update((pr) => ({ ...pr, boxPos: { ...pr.boxPos, [drag.key]: pos } }));
-    } else if (drag.kind === 'pass') {
-      // Положение прижимается к стене в расчёте, здесь храним точку курсора.
-      const pos = { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) };
-      update((pr) => ({ ...pr, passPos: { ...pr.passPos, [drag.key]: pos } }));
     } else if (drag.kind === 'panel') {
       update((pr) => ({ ...pr, panel: { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) } }));
     } else if (drag.kind === 'room') {
@@ -230,7 +218,7 @@ export function PlanEditor(props: Props) {
     if (drag?.kind === 'device') {
       update((pr) => ({
         ...pr,
-        devices: pr.devices.map((d) => (d.id === drag.id ? { ...d, roomId: roomAt(d.pos, pr.rooms) } : d)),
+        devices: pr.devices.map((d) => (d.id === drag.id ? placed(d, pr.rooms) : d)),
       }));
     }
     if (drag?.kind === 'room' && preview) {
@@ -239,6 +227,13 @@ export function PlanEditor(props: Props) {
     }
     setPreview(null);
     setDrag(null);
+  };
+
+  /** После перетаскивания: точка относится к помещению, отверстие прилипает к ближайшей стене между помещениями. */
+  const placed = (d: Device, rooms: Room[]): Device => {
+    if (d.typeKey !== 'passage') return { ...d, roomId: roomAt(d.pos, rooms) };
+    const s = snapHole(d.pos, sharedWalls(rooms));
+    return { ...d, roomId: null, pos: s ? s.pos : d.pos };
   };
 
   const canDrop = (e: React.DragEvent) => e.dataTransfer.types.includes(DRAG_MIME);
@@ -264,9 +259,11 @@ export function PlanEditor(props: Props) {
       } else {
         const t = DEVICE_TYPES[data.typeKey as DeviceTypeKey];
         if (!t) return pr;
-        dev = { id, specId: 'manual', typeKey: t.key, label: t.label, powerW: t.defaultPowerW, roomId: roomAt(pos, pr.rooms), pos };
+        const passItem = t.key === 'passage' ? pr.spec.find((x) => x.typeKey === 'passage') ?? AUTO_PASSAGE : undefined;
+        dev = { id, specId: passItem?.id ?? 'manual', typeKey: t.key, label: passItem?.name ?? t.label, powerW: t.defaultPowerW, roomId: roomAt(pos, pr.rooms), pos };
       }
-      return { ...pr, devices: [...pr.devices, dev] };
+      const devices = [...pr.devices, placed(dev, pr.rooms)];
+      return { ...pr, devices, spec: dev.typeKey === 'passage' ? withPassageSpec(pr.spec, devices) : pr.spec };
     });
     setSelection({ kind: 'device', id });
   };
@@ -376,27 +373,36 @@ export function PlanEditor(props: Props) {
         })}
 
         {calc.passages.map((w) => {
-          const name = w.rooms.map((id) => project.rooms.find((r) => r.id === id)?.name ?? id).join(' — ');
+          const name = w.rooms?.map((id) => project.rooms.find((r) => r.id === id)?.name ?? id).join(' — ');
           const len = 300;
+          const sel = selection?.kind === 'device' && selection.id === w.key;
           return (
-            <g key={w.key} transform={`translate(${w.pos.x} ${w.pos.y})`} className="device" onPointerDown={(e) => startPass(e, w.key, w.pos)}>
+            <g key={w.key} transform={`translate(${w.pos.x} ${w.pos.y})`} className="device" onPointerDown={(e) => startDevice(e, w.key, w.pos)}>
+              {sel && <circle r={R * 1.7} fill="none" stroke="var(--accent)" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
               <rect
                 x={w.vertical ? -len / 2 : -110}
                 y={w.vertical ? -110 : -len / 2}
                 width={w.vertical ? len : 220}
                 height={w.vertical ? 220 : len}
                 rx={40}
-                fill="var(--ink)"
+                fill={w.rooms ? 'var(--ink)' : 'var(--bad)'}
               />
               <text className="glyph" fontSize={150} fill="var(--surface)">
-                {w.cables}
+                {w.rooms ? w.cables : '!'}
               </text>
-              <title>{`Проход в стене ${name}: ${w.cables} кабелей (гр. ${w.groupNos.join(', ')}), гильза Ø${w.sleeveMm} мм. Перетащите вдоль стены`}</title>
+              <title>
+                {w.rooms
+                  ? `Проходное отверстие ${name}: ${w.cables} кабелей${w.cables ? ` (гр. ${w.groupNos.join(', ')}), гильза Ø${w.sleeveMm} мм` : ''}. Перетащите на любую стену между помещениями`
+                  : 'Отверстие не стоит на стене между помещениями — перетащите его на стену'}
+              </title>
             </g>
           );
         })}
 
-        {byLayer(project.devices, (d) => DEVICE_TYPES[d.typeKey].kind).map((d) => {
+        {byLayer(
+          project.devices.filter((d) => d.typeKey !== 'passage'),
+          (d) => DEVICE_TYPES[d.typeKey].kind,
+        ).map((d) => {
           const info = DEVICE_TYPES[d.typeKey];
           const off = muted(info.kind);
           const no = groupOf.get(d.id) ?? 0;
