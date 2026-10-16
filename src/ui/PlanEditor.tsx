@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { area, bbox, centroid, rect } from '../engine/geometry';
 import { DEVICE_TYPES } from '../engine/norms';
 import { roomAt } from '../engine/placement';
+import { wallAngle } from '../engine/wall';
 import type { DeviceKind, Project, ProjectCalc, Pt, Room } from '../engine/types';
 import { fmt, groupColor, type Selection, type Tool, type Update } from './state';
 
@@ -345,6 +346,9 @@ export function PlanEditor(props: Props) {
           const color = off ? MUTED : no ? groupColor(no) : '#868e96';
           const sel = selection?.kind === 'device' && selection.id === d.id;
           const dim = selectedGroupKey && calc.groups.find((g) => g.key === selectedGroupKey)?.deviceIds.includes(d.id) === false;
+          // Розетки и приборы — спиной к ближайшей стене своего помещения.
+          const room = info.kind !== 'light' ? project.rooms.find((r) => r.id === d.roomId) : undefined;
+          const angle = room ? wallAngle(room.poly, d.pos) : 0;
           const shape =
             d.typeKey === 'switch' ? (
               <g>
@@ -369,7 +373,7 @@ export function PlanEditor(props: Props) {
             >
               {sel && <circle r={R * 1.7} fill="none" stroke="var(--accent)" strokeWidth={2} vectorEffect="non-scaling-stroke" />}
               {!off && failedGroups.has(no) && <circle r={R * 1.35} fill="none" stroke="var(--bad)" strokeWidth={1.5} strokeDasharray="3 2" vectorEffect="non-scaling-stroke" />}
-              {shape}
+              <g transform={angle ? `rotate(${angle})` : undefined}>{shape}</g>
               <text className="glyph" fontSize={d.typeKey === 'switch' ? R * 0.6 : info.glyph.length > 1 ? R * 0.85 : R * 1.05} fill={color} y={info.kind === 'socket' ? R * 0.05 : 0}>
                 {info.glyph}
               </text>

@@ -3,6 +3,7 @@ import { classifyName, parsePowerW, parseSpecRows, splitText } from './classify'
 import { computeProject, pickBreaker, pickSection, voltageDropPct } from './calc';
 import { autoPlace, distribute } from './placement';
 import { findPassages, passageKey } from './passages';
+import { wallAngle } from './wall';
 import { demoProject, DEMO_ROOMS, DEMO_SPEC_TEXT } from '../data/demo';
 
 describe('классификация спецификации', () => {
@@ -196,5 +197,13 @@ describe('расчёт', () => {
   it('магистраль группы не проходит через одну стену дважды', () => {
     const calc = computeProject(demoProject());
     for (const g of calc.groups) expect(new Set(g.passages).size).toBe(g.passages.length);
+  });
+
+  it('разворачивает настенные значки спиной к ближайшей стене', () => {
+    const room = DEMO_ROOMS[0].poly; // 0..3500 × 0..3500
+    expect(wallAngle(room, { x: 1700, y: 3350 })).toBe(0); // стена снизу
+    expect(wallAngle(room, { x: 1700, y: 150 })).toBe(180); // стена сверху
+    expect(wallAngle(room, { x: 150, y: 1700 })).toBe(90); // стена слева
+    expect(wallAngle(room, { x: 3350, y: 1700 })).toBe(-90); // стена справа
   });
 });
