@@ -60,6 +60,12 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [selection, update]);
 
+  /** Инструмент рисования открывает вкладку «План», где его параметры и список помещений. */
+  const chooseTool = (t: Tool) => {
+    setTool(t);
+    if (t !== 'select') setLeft('plan');
+  };
+
   const reset = (p: Project) => {
     setProject(p);
     setSelection(null);
@@ -147,7 +153,6 @@ export default function App() {
       </aside>
 
       <main className="center">
-        <PanelSummary calc={calc} project={project} onSelect={() => setSelection({ kind: 'panel' })} />
         <PlanEditor
           project={project}
           calc={calc}
@@ -155,6 +160,7 @@ export default function App() {
           selection={selection}
           setSelection={setSelection}
           tool={tool}
+          onTool={chooseTool}
           fitSignal={fitSignal}
           onCalibrate={(a, b) => {
             setPendingCal({ a, b });
@@ -167,6 +173,7 @@ export default function App() {
             setLeft('plan');
           }}
         />
+        <PanelSummary calc={calc} project={project} onSelect={() => { setSelection({ kind: 'panel' }); setRight('calc'); }} />
       </main>
 
       <aside className="right">

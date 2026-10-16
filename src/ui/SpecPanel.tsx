@@ -6,7 +6,7 @@ import { autoPlace, matchRooms, roomAt } from '../engine/placement';
 import { pointOnPerimeter } from '../engine/geometry';
 import type { DeviceTypeKey, SpecItem } from '../engine/types';
 import { DEMO_SPEC_TEXT } from '../data/demo';
-import { fmt, type Update } from './state';
+import { DRAG_MIME, fmt, type Update } from './state';
 import type { Project } from '../engine/types';
 
 export function SpecPanel({ project, update }: { project: Project; update: Update }) {
@@ -86,9 +86,20 @@ export function SpecPanel({ project, update }: { project: Project; update: Updat
           <div className="spec-list">
             {project.spec.map((s) => {
               const rooms = matchRooms(s.roomHint, project.rooms);
+              const placed = project.devices.filter((d) => d.specId === s.id).length;
               return (
                 <div key={s.id} className={`spec-item${s.confidence === 0 ? ' unknown' : ''}`}>
-                  <div className="spec-name" title={s.name}>{s.name}</div>
+                  <div
+                    className="spec-name drag"
+                    draggable
+                    title={`${s.name}. Перетащите на план, чтобы добавить точку`}
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ specId: s.id }));
+                      e.dataTransfer.effectAllowed = 'copy';
+                    }}
+                  >
+                    <span className="grip">⠿</span> {s.name}
+                  </div>
                   <div className="spec-fields">
                     <select id={`t-${s.id}`} value={s.typeKey} onChange={(e) => edit(s.id, { typeKey: e.target.value as DeviceTypeKey, confidence: 1 })}>
                       {Object.values(DEVICE_TYPES).map((t) => (
@@ -107,7 +118,9 @@ export function SpecPanel({ project, update }: { project: Project; update: Updat
                         <option key={r.id} value={r.name}>{r.name}</option>
                       ))}
                     </select>
-                    <span className="muted small">{fmt((s.powerW * s.qty) / 1000, 2)} кВт всего</span>
+                    <span className="muted small">
+                      {fmt((s.powerW * s.qty) / 1000, 2)} кВт · <span className={`placed${placed >= s.qty ? ' full' : ''}`}>на плане {placed} из {s.qty}</span>
+                    </span>
                   </div>
                 </div>
               );
@@ -117,7 +130,7 @@ export function SpecPanel({ project, update }: { project: Project; update: Updat
             Разложить по плану
           </button>
           {project.rooms.length === 0 && <p className="muted small">Сначала задайте помещения на вкладке «План».</p>}
-          <p className="muted small">Раскладка заменит все точки на плане. Ручные перемещения будут потеряны.</p>
+          <p className="muted small">Раскладка заменит все точки на плане. Ручные перемещения будут потеряны. Отдельные точки можно добавить, перетащив позицию за название на план.</p>
         </>
       )}
     </div>
