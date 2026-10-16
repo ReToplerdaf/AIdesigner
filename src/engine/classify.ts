@@ -18,6 +18,7 @@ const TYPE_RULES: { key: DeviceTypeKey; re: RegExp }[] = [
   { key: 'microwave', re: /свч|микроволн/i },
   { key: 'light', re: /светильн|люстр|спот|лампа|подсветк|(?<![а-яё])бра(?![а-яё])/i },
   { key: 'switch', re: /выключат|переключат|диммер/i },
+  { key: 'passage', re: /проходн[а-яё]*\s+отверст|отверсти[а-яё]*\s+в\s+стен|гильз/i },
   { key: 'socket', re: /розетк/i },
 ];
 

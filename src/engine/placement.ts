@@ -4,6 +4,7 @@
 import { area, bbox, centroid, perimeter, pointInPolygon, pointOnPerimeter } from './geometry';
 import { roomTypeFromText } from './classify';
 import { nearestWallPoint } from './wall';
+import { findPassages } from './passages';
 import { DEVICE_TYPES } from './norms';
 import type { Device, DeviceTypeKey, Pt, Room, RoomType, SpecItem } from './types';
 
@@ -140,15 +141,39 @@ export const AUTO_SWITCH: SpecItem = {
   confidence: 1,
 };
 
+/** Проходное отверстие, которое добавляется в спецификацию при раскладке, если его там нет. */
+export const AUTO_PASSAGE: SpecItem = {
+  id: 'auto-passage',
+  name: 'Проходное отверстие в стене (гильза)',
+  qty: 1,
+  powerW: 0,
+  typeKey: 'passage',
+  roomHint: '',
+  confidence: 1,
+};
+
+/**
+ * Строка спецификации для проходных отверстий: количество — сколько отверстий стоит на плане.
+ * Если строки нет, а отверстия есть, добавляется автоматическая.
+ */
+export function withPassageSpec(spec: SpecItem[], devices: Device[]): SpecItem[] {
+  const item = spec.find((s) => s.typeKey === 'passage') ?? AUTO_PASSAGE;
+  const n = devices.filter((d) => d.typeKey === 'passage').length;
+  if (spec.includes(item)) return spec.map((s) => (s === item ? { ...s, qty: Math.max(n, 1) } : s));
+  return n ? [...spec, { ...item, qty: n }] : spec;
+}
+
 export function autoPlace(
   spec: SpecItem[],
   rooms: Room[],
   panel: Pt,
-  opts: { autoSwitches?: boolean } = {},
+  opts: { autoSwitches?: boolean; passages?: boolean } = {},
 ): Device[] {
   type Pending = { item: SpecItem; roomId: string | null };
   const perRoom = new Map<string | null, Pending[]>();
   for (const item of spec) {
+    // Проходные отверстия ставятся по стенам ниже, а не по помещениям.
+    if (item.typeKey === 'passage') continue;
     const alloc = allocate(item, rooms);
     if (alloc.size === 0) {
       const list = perRoom.get(null) ?? [];
@@ -204,6 +229,12 @@ export function autoPlace(
     // Небольшой сдвиг старта, чтобы точки не попадали в углы.
     const shift = 0.35 / Math.max(perimeter(room.poly) / 1000, 1) / 4;
     wall.forEach((p, k) => devices.push(make(p, pointOnPerimeter(room.poly, (k + 0.5) / m + shift, WALL_INSET))));
+  }
+
+  // По одному проходному отверстию посередине каждой общей стены между помещениями.
+  if (opts.passages ?? true) {
+    const item = spec.find((s) => s.typeKey === 'passage') ?? AUTO_PASSAGE;
+    for (const w of findPassages(rooms)) devices.push(make({ item, roomId: null }, w.pos));
   }
   return devices;
 }

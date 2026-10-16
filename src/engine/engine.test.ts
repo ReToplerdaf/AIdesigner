@@ -167,9 +167,12 @@ describe('расчёт', () => {
     expect(kh.pos.y).toBe(3500);
   });
 
+  const between = (r1: string, r2: string) => (p: { rooms: [string, string] | null }) =>
+    p.rooms?.join('|') === passageKey(r1, r2);
+
   it('все кабели между помещениями идут через одно отверстие в стене', () => {
     const calc = computeProject(demoProject());
-    const kh = calc.passages.find((p) => p.key === passageKey('r-kitchen', 'r-hall'))!;
+    const kh = calc.passages.find(between('r-kitchen', 'r-hall'))!;
     // Через стену прихожая/кухня идут кухонные линии: розетки, варочная, духовка, ПММ и свет.
     expect(kh.cables).toBeGreaterThanOrEqual(5);
     for (const g of calc.groups) {
@@ -186,12 +189,40 @@ describe('расчёт', () => {
     expect(kh.sleeveMm).toBeGreaterThanOrEqual(32);
   });
 
-  it('перенос отверстия вдоль стены прижимает его к стене', () => {
+  it('отверстия — позиция спецификации без нагрузки и вне групп', () => {
     const p = demoProject();
-    const key = passageKey('r-kitchen', 'r-hall');
-    const calc = computeProject({ ...p, passPos: { [key]: { x: 1000, y: 3900 } } });
-    const kh = calc.passages.find((x) => x.key === key)!;
-    expect(kh.pos).toEqual({ x: 1000, y: 3500 });
+    const holes = p.devices.filter((d) => d.typeKey === 'passage');
+    // Ставятся только отверстия, через которые идут кабели (стена спальня/санузел не нужна).
+    expect(holes.length).toBeLessThan(findPassages(DEMO_ROOMS).length);
+    expect(computeProject(p).passages.every((w) => w.cables > 0)).toBe(true);
+    const row = p.spec.find((s) => s.typeKey === 'passage')!;
+    expect(row.qty).toBe(holes.length);
+    expect(classifyName('Гильза ПВХ для прохода').typeKey).toBe('passage');
+    const calc = computeProject(p);
+    for (const g of calc.groups) for (const h of holes) expect(g.deviceIds).not.toContain(h.id);
+    expect(calc.panel.installedW).toBe(computeProject({ ...p, devices: p.devices.filter((d) => d.typeKey !== 'passage') }).panel.installedW);
+  });
+
+  it('отверстие прижимается к стене, а на другой стене кабели идут через неё', () => {
+    const p = demoProject();
+    const kh = computeProject(p).passages.find(between('r-kitchen', 'r-hall'))!;
+    // Сдвиг вдоль той же стены, с отступом от неё: точка прижимается к стене.
+    const slid = computeProject({ ...p, devices: p.devices.map((d) => (d.id === kh.key ? { ...d, pos: { x: 1000, y: 3900 } } : d)) });
+    expect(slid.passages.find((x) => x.key === kh.key)!.pos).toEqual({ x: 1000, y: 3500 });
+    // Перенос на стену кухня/гостиная (там уже есть отверстие — теперь их два).
+    const moved = computeProject({ ...p, devices: p.devices.map((d) => (d.id === kh.key ? { ...d, pos: { x: 3400, y: 1000 } } : d)) });
+    const hole = moved.passages.find((x) => x.key === kh.key)!;
+    expect(hole.rooms).toEqual(['r-kitchen', 'r-living'].sort());
+    expect(moved.passages.some(between('r-kitchen', 'r-hall'))).toBe(false);
+    // Кухонные линии теперь идут через гостиную, и все кабели между помещениями — через отверстия.
+    for (const g of moved.groups) expect(g.checks.every((c) => !c.text.startsWith('Нет проходного'))).toBe(true);
+  });
+
+  it('без отверстия между помещениями группа получает предупреждение', () => {
+    const p = demoProject();
+    const keep = p.devices.filter((d) => d.typeKey !== 'passage');
+    const calc = computeProject({ ...p, devices: keep });
+    expect(calc.groups.some((g) => g.checks.some((c) => !c.ok && c.text.startsWith('Нет проходного')))).toBe(true);
   });
 
   it('магистраль группы не проходит через одну стену дважды', () => {
