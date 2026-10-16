@@ -16,6 +16,8 @@ interface Props {
   onCalibrate: (a: Pt, b: Pt) => void;
   onRoomDrawn: (poly: Pt[]) => void;
   onTool: (t: Tool) => void;
+  /** Клик по прибору на плане: открыть его позицию в спецификации. */
+  onDevicePick: (id: string) => void;
   fitSignal: number;
 }
 
@@ -170,6 +172,7 @@ export function PlanEditor(props: Props) {
     const p = toSvg(e.clientX, e.clientY);
     setDrag({ kind: 'device', id, dx: pos.x - p.x, dy: pos.y - p.y });
     setSelection({ kind: 'device', id });
+    props.onDevicePick(id);
   };
 
   const startBox = (e: React.PointerEvent, key: string, pos: Pt, groupKey: string) => {
@@ -236,11 +239,6 @@ export function PlanEditor(props: Props) {
     }
     setPreview(null);
     setDrag(null);
-  };
-
-  const removeDevice = (id: string) => {
-    update((pr) => ({ ...pr, devices: pr.devices.filter((d) => d.id !== id) }));
-    setSelection(null);
   };
 
   const canDrop = (e: React.DragEvent) => e.dataTransfer.types.includes(DRAG_MIME);
@@ -443,20 +441,6 @@ export function PlanEditor(props: Props) {
                 </text>
               )}
               <title>{`${d.label}, ${fmt(d.powerW / 1000, 2)} кВт${no ? `, гр. ${no}` : ''}`}</title>
-              {sel && !off && (
-                <g
-                  className="del-handle"
-                  transform={`translate(${R * 1.2 + unit * 9} ${R * 0.6 + unit * 9})`}
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                    removeDevice(d.id);
-                  }}
-                >
-                  <circle r={unit * 9} fill="var(--ink-2)" />
-                  <path d={`M${-unit * 3.5} ${-unit * 3.5}L${unit * 3.5} ${unit * 3.5}M${unit * 3.5} ${-unit * 3.5}L${-unit * 3.5} ${unit * 3.5}`} stroke="#fff" strokeWidth={2} vectorEffect="non-scaling-stroke" />
-                  <title>Удалить с плана (Delete)</title>
-                </g>
-              )}
             </g>
           );
         })}
@@ -508,7 +492,7 @@ export function PlanEditor(props: Props) {
         ))}
       </div>
       <div className="plan-hint">
-        {tool === 'select' && 'Тащите точки по плану или приборы из списка слева. × или Delete удаляет. Колесо — масштаб.'}
+        {tool === 'select' && 'Тащите точки по плану или приборы из списка слева. Клик по прибору открывает его в спецификации. Колесо — масштаб.'}
         {tool === 'calibrate' && (calPts.length === 0 ? 'Кликните первую точку известного размера' : 'Кликните вторую точку')}
         {tool === 'room' && 'Растяните прямоугольник помещения'}
       </div>

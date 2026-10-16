@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { parseSpecRows, splitText } from '../engine/classify';
 import { DEVICE_TYPES } from '../engine/norms';
@@ -6,10 +6,17 @@ import { autoPlace, matchRooms, roomAt } from '../engine/placement';
 import { pointOnPerimeter } from '../engine/geometry';
 import type { DeviceTypeKey, SpecItem } from '../engine/types';
 import { DEMO_SPEC_TEXT } from '../data/demo';
-import { DRAG_MIME, fmt, type Update } from './state';
+import { DRAG_MIME, fmt, type Selection, type Update } from './state';
 import type { Project } from '../engine/types';
 
-export function SpecPanel({ project, update }: { project: Project; update: Update }) {
+interface Props {
+  project: Project;
+  update: Update;
+  selection: Selection;
+  setSelection: (s: Selection) => void;
+}
+
+export function SpecPanel({ project, update, selection, setSelection }: Props) {
   const [text, setText] = useState('');
   const [error, setError] = useState('');
 
@@ -44,6 +51,31 @@ export function SpecPanel({ project, update }: { project: Project; update: Updat
       }
       return { ...p, panel, devices: autoPlace(p.spec, p.rooms, panel, { autoSwitches: p.settings.autoSwitches ?? true }) };
     });
+
+  // Прибор, выбранный на плане: его позиция поднимается наверх списка, внизу плашки — удаление точки.
+  const picked = selection?.kind === 'device' ? project.devices.find((d) => d.id === selection.id) : undefined;
+  const pickedSpec = picked ? project.spec.find((s) => s.id === picked.specId) : undefined;
+  const ordered = pickedSpec ? [pickedSpec, ...project.spec.filter((s) => s !== pickedSpec)] : project.spec;
+  const topRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (picked) topRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [picked?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const removePicked = () => {
+    if (!picked) return;
+    update((p) => ({ ...p, devices: p.devices.filter((d) => d.id !== picked.id) }));
+    setSelection(null);
+  };
+  const pickedFooter = picked && (
+    <div className="spec-picked">
+      <span className="small">
+        Выбрана точка: {project.rooms.find((r) => r.id === picked.roomId)?.name ?? 'вне помещений'}
+      </span>
+      <button id="remove-point" className="btn small danger" onClick={removePicked}>
+        Удалить с плана
+      </button>
+    </div>
+  );
 
   const unknown = project.spec.filter((s) => s.confidence === 0).length;
   const total = project.spec.reduce((s, i) => s + i.qty, 0);
@@ -83,12 +115,21 @@ export function SpecPanel({ project, update }: { project: Project; update: Updat
             <strong>{project.spec.length} позиций, {total} шт.</strong>
             {unknown > 0 && <span className="bad"> · не распознано: {unknown}</span>}
           </div>
-          <div className="spec-list">
-            {project.spec.map((s) => {
+          <div className="spec-list" ref={topRef}>
+            {picked && !pickedSpec && (
+              <div className="spec-item sel">
+                <div className="spec-name">{picked.label}</div>
+                <p className="muted small">
+                  {DEVICE_TYPES[picked.typeKey].label}, {fmt(picked.powerW / 1000, 2)} кВт · не из спецификации
+                </p>
+                {pickedFooter}
+              </div>
+            )}
+            {ordered.map((s) => {
               const rooms = matchRooms(s.roomHint, project.rooms);
               const placed = project.devices.filter((d) => d.specId === s.id).length;
               return (
-                <div key={s.id} className={`spec-item${s.confidence === 0 ? ' unknown' : ''}`}>
+                <div key={s.id} className={`spec-item${s.confidence === 0 ? ' unknown' : ''}${s === pickedSpec ? ' sel' : ''}`}>
                   <div
                     className="spec-name drag"
                     draggable
@@ -122,6 +163,7 @@ export function SpecPanel({ project, update }: { project: Project; update: Updat
                       {fmt((s.powerW * s.qty) / 1000, 2)} кВт · <span className={`placed${placed >= s.qty ? ' full' : ''}`}>на плане {placed} из {s.qty}</span>
                     </span>
                   </div>
+                  {s === pickedSpec && pickedFooter}
                 </div>
               );
             })}
