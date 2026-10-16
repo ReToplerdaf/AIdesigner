@@ -53,3 +53,7 @@ export function download(filename: string, content: string, type: string) {
 
 export const fmt = (v: number, d = 1) =>
   v.toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: d });
+
+/** Перетаскивание из списка на план: позиция спецификации или тип прибора без спецификации. */
+export const DRAG_MIME = 'application/x-aid-device';
+export type DragPayload = { specId: string } | { typeKey: string };

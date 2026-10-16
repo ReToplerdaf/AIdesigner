@@ -1,8 +1,8 @@
 import { area } from '../engine/geometry';
-import { ROOM_TYPES } from '../engine/norms';
+import { DEVICE_TYPES, ROOM_TYPES } from '../engine/norms';
 import { roomTypeFromText } from '../engine/classify';
 import type { Project, RoomType } from '../engine/types';
-import { fmt, type Selection, type Tool, type Update } from './state';
+import { DRAG_MIME, fmt, type Selection, type Tool, type Update } from './state';
 
 interface Props {
   project: Project;
@@ -89,6 +89,27 @@ export function PlanPanel(props: Props) {
             </div>
           </form>
         )}
+      </section>
+
+      <section className="stack-s">
+        <h3>Добавить на план</h3>
+        <p className="muted small">Перетащите прибор на план. Позиции из спецификации можно тянуть со вкладки «Спецификация».</p>
+        <div className="palette">
+          {Object.values(DEVICE_TYPES).map((t) => (
+            <span
+              key={t.key}
+              className="chip"
+              draggable
+              title={`${t.label}, ${fmt(t.defaultPowerW / 1000, 2)} кВт`}
+              onDragStart={(e) => {
+                e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ typeKey: t.key }));
+                e.dataTransfer.effectAllowed = 'copy';
+              }}
+            >
+              <b>{t.glyph}</b> {t.label}
+            </span>
+          ))}
+        </div>
       </section>
 
       <section className="stack-s">

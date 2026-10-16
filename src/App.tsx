@@ -147,7 +147,6 @@ export default function App() {
       </aside>
 
       <main className="center">
-        <PanelSummary calc={calc} project={project} onSelect={() => setSelection({ kind: 'panel' })} />
         <PlanEditor
           project={project}
           calc={calc}
@@ -167,6 +166,7 @@ export default function App() {
             setLeft('plan');
           }}
         />
+        <PanelSummary calc={calc} project={project} onSelect={() => { setSelection({ kind: 'panel' }); setRight('calc'); }} />
       </main>
 
       <aside className="right">
