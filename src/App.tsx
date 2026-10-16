@@ -147,7 +147,7 @@ export default function App() {
               cancelCalibration={() => setPendingCal(null)}
             />
           )}
-          {left === 'spec' && <SpecPanel project={project} update={update} />}
+          {left === 'spec' && <SpecPanel project={project} update={update} selection={selection} setSelection={setSelection} />}
           {left === 'settings' && <SettingsPanel project={project} update={update} />}
         </div>
       </aside>
@@ -161,6 +161,7 @@ export default function App() {
           setSelection={setSelection}
           tool={tool}
           onTool={chooseTool}
+          onDevicePick={() => setLeft('spec')}
           fitSignal={fitSignal}
           onCalibrate={(a, b) => {
             setPendingCal({ a, b });

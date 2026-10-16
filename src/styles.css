@@ -96,11 +96,9 @@ textarea { width: 100%; font-family: var(--mono); font-size: 12px; resize: verti
 .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 12px; font-size: 12px; cursor: grab; background: var(--surface); user-select: none; }
 .chip:hover { border-color: var(--accent); }
 .chip b { font-family: var(--mono); color: var(--ink-2); font-size: 11px; }
-.placed { color: var(--ink-2); }
+.placed { color: var(--ink-2); white-space: nowrap; }
 .placed.full { color: var(--ok); }
 .plan.dropping svg { outline: 2px dashed var(--accent); outline-offset: -4px; }
-.del-handle { cursor: pointer; }
-.del-handle:hover circle { fill: var(--bad); }
 .calib { display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--accent-soft); border-radius: 4px; font-size: 13px; }
 .calib input { width: 100px; }
 
@@ -114,6 +112,10 @@ textarea { width: 100%; font-family: var(--mono); font-size: 12px; resize: verti
 .spec-name.drag { cursor: grab; }
 .grip { color: var(--ink-2); font-weight: 400; }
 .spec-item { border: 1px solid var(--line); border-radius: 4px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.spec-item.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.spec-picked { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover { border-color: var(--bad); background: #fff5f5; }
 .spec-item.unknown { border-color: var(--bad); }
 .spec-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spec-fields { display: grid; grid-template-columns: 1fr 52px auto 58px auto; gap: 4px; align-items: center; }
