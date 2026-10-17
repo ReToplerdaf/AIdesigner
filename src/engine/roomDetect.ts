@@ -72,6 +72,8 @@ const SOLID_WALL_MM = 60;
 const DIAG_GAP_MM = 1400;
 /** Наибольший проём между торцом перегородки и боком поперечной стены (дверь в углу). */
 const SIDE_GAP_MM = 1000;
+/** Наибольшая ширина окна, которое закрываем при поиске границы дома по коротким простенкам. */
+const WINDOW_MM = 2500;
 /** Тёмные области толще этого — заливка пола или чёрный фон, а не стена, мм. */
 const FILL_MM = 1000;
 /** Линии тоньше этого считаются графикой, а не стеной, мм. */
@@ -228,7 +230,10 @@ export async function detectOutline(cv: OpenCV, plan: RasterPlan, closeMm = 1200
     const bridge = new Uint8Array(W * H);
     const maxEnd = Math.max(1.6 * wallPx, 3 * tMin, 3);
     bridgeGaps(wd, W, H, Math.max(W, H), maxEnd, bridge, 2, 1.5 * wallPx);
-    bridgeDiagonal(wd, W, H, DIAG_GAP_MM / mmPerPx, maxEnd, 2, bridge);
+    // Окна: тонкие линии остекления стёрты, а простенки у окна бывают короткими (косые эркеры) —
+    // для проёмов окна по ширине хватит торца, который хотя бы не уже своей толщины.
+    bridgeGaps(wd, W, H, WINDOW_MM / mmPerPx, maxEnd, bridge, 1, 0);
+    bridgeDiagonal(wd, W, H, WINDOW_MM / mmPerPx, maxEnd, 2, bridge);
     for (let i = 0; i < wd.length; i++) if (bridge[i]) wd[i] = 255;
     const closed = keep(new cv.Mat());
     const kPx = Math.max(3, Math.round(closeMm / mmPerPx));
@@ -369,22 +374,28 @@ export function bridgeGaps(
   const vRun = runs(wall, W, H, false);
   const hRun = runs(wall, W, H, true);
   /**
-   * Край стены у промежутка: 2 — свободный торец; 1 — торец у примыкания поперечной стены (дверь прямо у угла:
-   * сам крайний пиксель лежит в поперечной стене, а тонкая перегородка начинается за ней); 0 — не торец.
+   * Край стены у промежутка: 3 — свободный торец; 2 — торец у примыкания поперечной стены (дверь прямо у угла:
+   * сам крайний пиксель лежит в поперечной стене, а тонкая перегородка начинается за ней); 1 — просто бок
+   * поперечной стены (только для узких проёмов); 0 — не торец.
    * back — шаг по индексу вглубь стены, limit — сколько шагов можно сделать, не выходя за край картинки.
    */
   const end = (i: number, back: number, limit: number, along: Uint32Array, across: Uint32Array): number => {
-    if (across[i] <= maxEnd) return long(along[i], across[i]) ? 2 : 0;
+    if (across[i] <= maxEnd) return long(along[i], across[i]) ? 3 : 0;
     if (!junctions) return 0;
-    // Бок поперечной стены (дверь в углу, напротив торца перегородки) — только для узких проёмов.
-    if (gapNow <= sideGap && along[i] <= maxEnd) return 1;
     for (let j = 1, p = i + back; j <= Math.min(limit, maxEnd) && wall[p]; j++, p += back)
       // За примыканием должна начинаться настоящая стена, длинная вдоль, а не штриховка или значок.
-      if (across[p] <= maxEnd) return long(along[p], across[p]) && along[p] >= minAlong ? 1 : 0;
-    return 0;
+      if (across[p] <= maxEnd) {
+        if (long(along[p], across[p]) && along[p] >= minAlong) return 2;
+        break;
+      }
+    return gapNow <= sideGap && along[i] <= maxEnd ? 1 : 0;
   };
-  // Хотя бы один край — свободный торец: два примыкания друг напротив друга — это коридор, а не дверь.
-  const ok = (a: number, b: number) => a > 0 && b > 0 && a + b >= 3;
+  /**
+   * Свободный торец напротив чего угодно — дверь. Два примыкания друг напротив друга — дверь в прямой стене,
+   * но только узкая: иначе это коридор между выровненными перегородками. Бок напротив бока — всегда коридор.
+   */
+  const ok = (a: number, b: number) =>
+    a > 0 && b > 0 && (a === 3 || b === 3 || (a === 2 && b === 2 && gapNow <= sideGap));
   let gapNow = 0;
   let count = 0;
   for (let y = 0; y < H; y++) {
