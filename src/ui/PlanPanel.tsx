@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { area } from '../engine/geometry';
-import { detectOutline, detectRooms, newRooms, type DetectStage } from '../engine/roomDetect';
+import { detectOutline, detectRooms, fitToAreas, newRooms, type DetectStage } from '../engine/roomDetect';
 import { rect } from '../engine/geometry';
 import { readLabel, unionBox } from '../engine/roomLabels';
 import { DEVICE_TYPES, ROOM_TYPES } from '../engine/norms';
@@ -97,7 +97,7 @@ export function PlanPanel(props: Props) {
         kind: 'done',
         pct: 100,
         text: found
-          ? 'Шаг 1 из 2. Синяя линия — граница дома. Проверьте её: углы и стены можно тянуть, двойной клик добавляет или убирает угол.'
+          ? 'Шаг 1 из 2. Синяя линия — граница дома. Проверьте её: углы и стены можно тянуть, двойной клик по стене добавляет угол, «×» у выбранного угла убирает его.'
           : 'Шаг 1 из 2. Границу дома найти не удалось, поставил рамку по краю плана. Подтяните её углы и стены к наружным стенам.',
       });
     } catch (e) {
@@ -144,6 +144,36 @@ export function PlanPanel(props: Props) {
           ocrNote = ` Подписи прочитать не удалось: ${(e as Error).message}.`;
         }
       }
+      // Площадь с подписи — проверка: где контур с ней расходится, план распознаётся заново с другой очисткой линий
+      // и проёмов, и берётся вариант, площадь которого ближе к подписи.
+      let fitted = 0;
+      const targets = made
+        .map((r, i) => ({ r, i }))
+        .filter(({ r }) => r.planAreaM2 && r.areaSrc && Math.abs(area(r.poly) / 1e6 - r.planAreaM2) / r.planAreaM2 > 0.02);
+      if (targets.length) {
+        const others = [
+          ...fresh.map((f) => f.inside),
+          ...project.rooms.map((r) => bboxOf(r.poly)).map((b) => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 })),
+        ];
+        const res2 = await fitToAreas(
+          cv,
+          raster,
+          { boundary: project.outline },
+          targets.map(({ r }) => ({ inside: { x: r.areaSrc!.x + r.areaSrc!.w / 2, y: r.areaSrc!.y + r.areaSrc!.h / 2 }, m2: r.planAreaM2!, poly: r.poly })),
+          others,
+          0.02,
+          async (v, n) => {
+            step(99, `Сверяю площади с подписями… вариант ${v + 1} из ${n}`);
+            await frame();
+          },
+        );
+        res2.forEach((poly, k) => {
+          if (!poly) return;
+          // Соседние комнаты новый контур не захватывает: такие варианты fitToAreas отбрасывает.
+          targets[k].r.poly = poly;
+          fitted++;
+        });
+      }
       const named = made.filter((r) => r.name).length;
       update((p) => ({
         ...p,
@@ -157,7 +187,7 @@ export function PlanPanel(props: Props) {
           res.rooms.length === 0
             ? 'Помещения не найдены. Проверьте масштаб или обведите комнаты вручную.'
             : `Найдено помещений: ${res.rooms.length}, добавлено: ${fresh.length}${skipped ? ` (${skipped} уже были на плане)` : ''}. ` +
-              `Названия прочитаны у ${named} из ${fresh.length}.${ocrNote} Проверьте их ниже, контуры правьте инструментом «Растянуть».`,
+              `Названия прочитаны у ${named} из ${fresh.length}.${fitted ? ` По площади с подписи уточнено контуров: ${fitted}.` : ''}${ocrNote} Проверьте их ниже, контуры правьте инструментом «Растянуть».`,
       });
     } catch (e) {
       setStatus({ kind: 'error', pct: 100, text: `Не получилось: ${(e as Error).message}` });
@@ -322,8 +352,8 @@ export function PlanPanel(props: Props) {
           )}
           {tool === 'stretch' && (
             <p className="muted small">
-              Кликните помещение. Угол тяните, чтобы растянуть комнату в две стороны, стену — чтобы сдвинуть её. Двойной клик по углу
-              удаляет его, по стене — добавляет угол.
+              Кликните помещение. Угол тяните, чтобы растянуть комнату в две стороны, стену — чтобы сдвинуть её. Двойной клик по стене
+              добавляет угол. Чтобы убрать угол, нажмите на него и затем на красный «×» рядом (или Delete, или правый клик).
             </p>
           )}
           {tool === 'calibrate' && props.pendingCalibration == null && (

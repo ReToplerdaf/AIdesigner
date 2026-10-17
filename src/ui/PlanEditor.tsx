@@ -96,6 +96,8 @@ export function PlanEditor(props: Props) {
   const [calPts, setCalPts] = useState<Pt[]>([]);
   const [polyPts, setPolyPts] = useState<Pt[]>([]);
   const [hover, setHover] = useState<Pt | null>(null);
+  /** Угол, на который нажали последним: его можно удалить кнопкой «×» рядом или клавишей Delete. */
+  const [activeCorner, setActiveCorner] = useState<{ id: string; idx: number } | null>(null);
   const labels = usePlanUi();
   const ui = labels;
   const [dropping, setDropping] = useState(false);
@@ -199,6 +201,7 @@ export function PlanEditor(props: Props) {
   const startHandle = (e: React.PointerEvent, kind: 'corner' | 'edge', id: string, poly: Pt[], idx: number) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    setActiveCorner(kind === 'corner' ? { id, idx } : null);
     svgRef.current!.setPointerCapture(e.pointerId);
     setDrag({ kind, roomId: id, idx, start: toSvg(e.clientX, e.clientY), orig: poly });
   };
@@ -208,6 +211,36 @@ export function PlanEditor(props: Props) {
     update((pr) =>
       id === OUTLINE ? { ...pr, outline: poly } : { ...pr, rooms: pr.rooms.map((r) => (r.id === id ? { ...r, poly } : r)) },
     );
+
+  const polyOf = (id: string) => (id === OUTLINE ? project.outline : project.rooms.find((r) => r.id === id)?.poly);
+
+  const deleteCorner = (id: string, idx: number) => {
+    const poly = polyOf(id);
+    if (poly) setRoomPoly(id, removeCorner(poly, idx));
+    setActiveCorner(null);
+  };
+
+  // Выбранный угол живёт, пока видны ручки его контура.
+  const cornerShown =
+    activeCorner &&
+    ((activeCorner.id === OUTLINE && ui.outlineEdit) ||
+      (tool === 'stretch' && selection?.kind === 'room' && selection.id === activeCorner.id)) &&
+    (polyOf(activeCorner.id)?.length ?? 0) > activeCorner.idx;
+
+  useEffect(() => {
+    if (!cornerShown || !activeCorner) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        deleteCorner(activeCorner.id, activeCorner.idx);
+      }
+      if (e.key === 'Escape') setActiveCorner(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
 
   /** Ручки правки контура: стороны (сдвиг, двойной клик — новый угол) и углы (растяжение, двойной клик — убрать). */
   const handles = (id: string, poly: Pt[], color: string) => (
@@ -231,6 +264,7 @@ export function PlanEditor(props: Props) {
               onDoubleClick={(e) => {
                 e.stopPropagation();
                 setRoomPoly(id, insertCorner(poly, i, toSvg(e.clientX, e.clientY)));
+                setActiveCorner({ id, idx: i + 1 });
               }}
             />
             <EdgeLabel a={a} b={b} unit={unit} color={color} />
@@ -244,7 +278,7 @@ export function PlanEditor(props: Props) {
           y={a.y - unit * 5}
           width={unit * 10}
           height={unit * 10}
-          fill="var(--surface)"
+          fill={activeCorner?.id === id && activeCorner.idx === i ? color : 'var(--surface)'}
           stroke={color}
           strokeWidth={2}
           vectorEffect="non-scaling-stroke"
@@ -253,10 +287,29 @@ export function PlanEditor(props: Props) {
           onPointerDown={(e) => startHandle(e, 'corner', id, poly, i)}
           onDoubleClick={(e) => {
             e.stopPropagation();
-            setRoomPoly(id, removeCorner(poly, i));
+            deleteCorner(id, i);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            deleteCorner(id, i);
           }}
         />
       ))}
+      {cornerShown && activeCorner.id === id && poly.length > 3 && (
+        <g
+          className="corner-del"
+          transform={`translate(${poly[activeCorner.idx].x + unit * 14} ${poly[activeCorner.idx].y - unit * 14})`}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            deleteCorner(id, activeCorner.idx);
+          }}
+        >
+          <title>Удалить угол (Delete)</title>
+          <circle r={unit * 9} />
+          <path d={`M${-unit * 3.5} ${-unit * 3.5}L${unit * 3.5} ${unit * 3.5}M${unit * 3.5} ${-unit * 3.5}L${-unit * 3.5} ${unit * 3.5}`} />
+        </g>
+      )}
     </g>
   );
 
@@ -704,7 +757,7 @@ export function PlanEditor(props: Props) {
       </div>
       <div className="plan-hint">
         {ui.outlineEdit && !labels.pick ? (
-          'Граница дома: тяните углы и стены, двойной клик добавляет или убирает угол. Затем «Граница верна» слева'
+          'Граница дома: тяните углы и стены. Двойной клик по стене добавляет угол; угол убрать — нажмите на него и «×» рядом или Delete. Затем «Граница верна» слева'
         ) : labels.pick ? (
           `Обведите рамкой ${labels.pick.field === 'name' ? 'название' : 'площадь'} помещения на плане. Esc — отмена`
         ) : (
@@ -718,7 +771,7 @@ export function PlanEditor(props: Props) {
               : 'Замкните: клик по первой точке, двойной клик или Enter. Backspace — убрать точку')}
           {tool === 'stretch' &&
             (selection?.kind === 'room'
-              ? 'Тяните угол — комната растягивается в две стороны, стену — в одну. Двойной клик: угол убрать, на стене — добавить'
+              ? 'Тяните угол — комната растягивается в две стороны, стену — в одну. Двойной клик по стене добавляет угол; угол убрать — нажмите на него и «×» рядом или Delete'
               : 'Кликните помещение, чтобы править его контур')}
           </>
         )}
