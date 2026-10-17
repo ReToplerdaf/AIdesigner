@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { area, bbox, centroid, rect } from '../engine/geometry';
+import { area, bbox, centroid, dist, rect } from '../engine/geometry';
+import { insertCorner, moveCorner, moveEdge, orthoSnap, removeCorner } from '../engine/roomEdit';
 import { DEVICE_TYPES } from '../engine/norms';
 import { AUTO_PASSAGE, roomAt, withPassageSpec } from '../engine/placement';
 import { wallAngle } from '../engine/wall';
@@ -30,6 +31,7 @@ type Drag =
   | { kind: 'box'; key: string; dx: number; dy: number }
   | { kind: 'pan'; start: Pt; view: View; inv: DOMMatrix }
   | { kind: 'room'; start: Pt }
+  | { kind: 'corner' | 'edge'; roomId: string; idx: number; start: Pt; orig: Pt[] }
   | null;
 
 const R = 140;
@@ -51,6 +53,12 @@ const TOOLS: { key: Tool; label: string; icon: JSX.Element }[] = [
     icon: <path d="M3 15l12-12 6 6-12 12zM7 11l2 2M10 8l2 2M13 5l2 2" />,
   },
   { key: 'room', label: 'Помещение: растяните прямоугольник', icon: <path d="M4 4h16v16H4zM4 12h6M14 4v6" /> },
+  { key: 'poly', label: 'Многоугольник: кликайте по углам комнаты', icon: <path d="M4 20V9l7-5 9 4v6h-6v6z" /> },
+  {
+    key: 'stretch',
+    label: 'Растянуть: тяните угол или стену помещения',
+    icon: <path d="M5 5h14v14H5zM15 15l5 5M17 20h3v-3M9 12h6M12 9v6" />,
+  },
 ];
 const layerOf = (kind: DeviceKind): Layer => (kind === 'light' ? 'light' : 'power');
 const ROOM_FILL: Record<Room['type'], string> = {
@@ -82,6 +90,8 @@ export function PlanEditor(props: Props) {
   const [drag, setDrag] = useState<Drag>(null);
   const [preview, setPreview] = useState<Pt[] | null>(null);
   const [calPts, setCalPts] = useState<Pt[]>([]);
+  const [polyPts, setPolyPts] = useState<Pt[]>([]);
+  const [hover, setHover] = useState<Pt | null>(null);
   const [dropping, setDropping] = useState(false);
   const [layer, setLayer] = useState<Layer>(() => {
     try {
@@ -106,7 +116,11 @@ export function PlanEditor(props: Props) {
   ];
 
   useEffect(() => setView(fitView(project)), [props.fitSignal]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => setCalPts([]), [tool]);
+  useEffect(() => {
+    setCalPts([]);
+    setPolyPts([]);
+    setHover(null);
+  }, [tool]);
 
   const toSvg = useCallback((clientX: number, clientY: number, inv?: DOMMatrix): Pt => {
     const svg = svgRef.current!;
@@ -144,6 +158,40 @@ export function PlanEditor(props: Props) {
         ? calc.groups.find((g) => g.deviceIds.includes(selection.id))?.key
         : undefined;
 
+  /** Радиус «прилипания» к первой точке многоугольника: около 10 пикселей экрана. */
+  const closeR = (view.w / 1000) * 10;
+  const polyPoint = (p: Pt, free: boolean) => (polyPts.length && !free ? orthoSnap(polyPts[polyPts.length - 1], p) : p);
+
+  const finishPoly = (pts: Pt[]) => {
+    // Двойной клик добавляет две точки на одном месте — склеиваем близкие.
+    const clean = pts.filter((q, i) => i === 0 || dist(q, pts[i - 1]) > closeR / 2);
+    const poly = clean.map((q) => ({ x: Math.round(q.x), y: Math.round(q.y) }));
+    if (poly.length >= 3 && area(poly) > 0.3e6) props.onRoomDrawn(poly);
+    setPolyPts([]);
+  };
+
+  useEffect(() => {
+    if (tool !== 'poly') return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'Enter') finishPoly(polyPts);
+      if (e.key === 'Backspace') setPolyPts((pts) => pts.slice(0, -1));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  const startHandle = (e: React.PointerEvent, kind: 'corner' | 'edge', room: Room, idx: number) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    svgRef.current!.setPointerCapture(e.pointerId);
+    setDrag({ kind, roomId: room.id, idx, start: toSvg(e.clientX, e.clientY), orig: room.poly });
+  };
+
+  const setRoomPoly = (id: string, poly: Pt[]) =>
+    update((pr) => ({ ...pr, rooms: pr.rooms.map((r) => (r.id === id ? { ...r, poly } : r)) }));
+
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 && e.button !== 1) return;
     const svg = svgRef.current!;
@@ -151,6 +199,12 @@ export function PlanEditor(props: Props) {
     const p = toSvg(e.clientX, e.clientY);
     if (tool === 'room' && e.button === 0) {
       setDrag({ kind: 'room', start: p });
+      return;
+    }
+    if (tool === 'poly' && e.button === 0) {
+      const q = polyPoint(p, e.shiftKey);
+      if (polyPts.length >= 3 && dist(q, polyPts[0]) < closeR) finishPoly(polyPts);
+      else setPolyPts([...polyPts, q]);
       return;
     }
     if (tool === 'calibrate' && e.button === 0) {
@@ -194,7 +248,10 @@ export function PlanEditor(props: Props) {
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!drag) return;
+    if (!drag) {
+      if (tool === 'poly') setHover(polyPoint(toSvg(e.clientX, e.clientY), e.shiftKey));
+      return;
+    }
     if (drag.kind === 'pan') {
       const p = toSvg(e.clientX, e.clientY, drag.inv);
       setView({ ...drag.view, x: drag.view.x - (p.x - drag.start.x), y: drag.view.y - (p.y - drag.start.y) });
@@ -211,6 +268,9 @@ export function PlanEditor(props: Props) {
       update((pr) => ({ ...pr, panel: { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) } }));
     } else if (drag.kind === 'room') {
       setPreview(rect(drag.start.x, drag.start.y, p.x, p.y));
+    } else if (drag.kind === 'corner' || drag.kind === 'edge') {
+      const delta = { x: p.x - drag.start.x, y: p.y - drag.start.y };
+      setRoomPoly(drag.roomId, (drag.kind === 'corner' ? moveCorner : moveEdge)(drag.orig, drag.idx, delta));
     }
   };
 
@@ -224,6 +284,13 @@ export function PlanEditor(props: Props) {
     if (drag?.kind === 'room' && preview) {
       const b = bbox(preview);
       if (b.maxX - b.minX > 300 && b.maxY - b.minY > 300) props.onRoomDrawn(preview.map((q) => ({ x: Math.round(q.x), y: Math.round(q.y) })));
+    }
+    if (drag?.kind === 'corner' || drag?.kind === 'edge') {
+      // Контур изменился — приборы у его границы могли оказаться в другом помещении.
+      update((pr) => ({
+        ...pr,
+        devices: pr.devices.map((d) => (d.typeKey !== 'passage' && (d.roomId === drag.roomId || !d.roomId) ? placed(d, pr.rooms) : d)),
+      }));
     }
     setPreview(null);
     setDrag(null);
@@ -291,6 +358,7 @@ export function PlanEditor(props: Props) {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onDoubleClick={() => tool === 'poly' && finishPoly(polyPts)}
         style={{ cursor }}
       >
         <defs>
@@ -324,7 +392,7 @@ export function PlanEditor(props: Props) {
                 strokeWidth={sel ? 3 : project.image ? 1.5 : 4}
                 vectorEffect="non-scaling-stroke"
                 onPointerDown={(e) => {
-                  if (tool === 'select' && e.button === 0) setTimeout(() => setSelection({ kind: 'room', id: r.id }));
+                  if ((tool === 'select' || tool === 'stretch') && e.button === 0) setTimeout(() => setSelection({ kind: 'room', id: r.id }));
                 }}
               />
               <text x={c.x} y={c.y} className="room-label" fontSize={Math.max(160, unit * 13)}>
@@ -477,6 +545,73 @@ export function PlanEditor(props: Props) {
             vectorEffect="non-scaling-stroke"
           />
         )}
+        {tool === 'poly' && polyPts.length > 0 && (
+          <g style={{ pointerEvents: 'none' }}>
+            <polyline
+              points={[...polyPts, ...(hover ? [hover] : [])].map((p) => `${p.x},${p.y}`).join(' ')}
+              fill="var(--accent-soft)"
+              stroke="var(--accent)"
+              strokeWidth={2}
+              vectorEffect="non-scaling-stroke"
+            />
+            {polyPts.map((p, i) => (
+              <circle key={i} cx={p.x} cy={p.y} r={unit * (i === 0 ? 6 : 3.5)} fill={i === 0 ? 'var(--surface)' : 'var(--accent)'} stroke="var(--accent)" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+            ))}
+            {hover && <EdgeLabel a={polyPts[polyPts.length - 1]} b={hover} unit={unit} />}
+          </g>
+        )}
+        {tool === 'stretch' &&
+          project.rooms
+            .filter((r) => selection?.kind === 'room' && selection.id === r.id)
+            .map((r) => (
+              <g key={`h-${r.id}`}>
+                {r.poly.map((a, i) => {
+                  const b = r.poly[(i + 1) % r.poly.length];
+                  const cur = a.y === b.y ? 'ns-resize' : a.x === b.x ? 'ew-resize' : 'move';
+                  return (
+                    <g key={`e${i}`}>
+                      <line
+                        x1={a.x}
+                        y1={a.y}
+                        x2={b.x}
+                        y2={b.y}
+                        stroke="transparent"
+                        strokeWidth={14}
+                        vectorEffect="non-scaling-stroke"
+                        style={{ cursor: cur }}
+                        className="edge-handle"
+                        onPointerDown={(e) => startHandle(e, 'edge', r, i)}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setRoomPoly(r.id, insertCorner(r.poly, i, toSvg(e.clientX, e.clientY)));
+                        }}
+                      />
+                      <EdgeLabel a={a} b={b} unit={unit} />
+                    </g>
+                  );
+                })}
+                {r.poly.map((a, i) => (
+                  <rect
+                    key={`c${i}`}
+                    x={a.x - unit * 5}
+                    y={a.y - unit * 5}
+                    width={unit * 10}
+                    height={unit * 10}
+                    fill="var(--surface)"
+                    stroke="var(--accent)"
+                    strokeWidth={2}
+                    vectorEffect="non-scaling-stroke"
+                    style={{ cursor: 'move' }}
+                    className="corner-handle"
+                    onPointerDown={(e) => startHandle(e, 'corner', r, i)}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      setRoomPoly(r.id, removeCorner(r.poly, i));
+                    }}
+                  />
+                ))}
+              </g>
+            ))}
         {calPts.map((p, i) => (
           <circle key={i} cx={p.x} cy={p.y} r={unit * 5} fill="var(--accent)" />
         ))}
@@ -501,7 +636,26 @@ export function PlanEditor(props: Props) {
         {tool === 'select' && 'Тащите точки по плану или приборы из списка слева. Клик по прибору открывает его в спецификации. Колесо — масштаб.'}
         {tool === 'calibrate' && (calPts.length === 0 ? 'Кликните первую точку известного размера' : 'Кликните вторую точку')}
         {tool === 'room' && 'Растяните прямоугольник помещения'}
+        {tool === 'poly' &&
+          (polyPts.length < 3
+            ? 'Кликайте по углам комнаты'
+            : 'Замкните: клик по первой точке, двойной клик или Enter. Backspace — убрать точку')}
+        {tool === 'stretch' &&
+          (selection?.kind === 'room'
+            ? 'Тяните угол — комната растягивается в две стороны, стену — в одну. Двойной клик: угол убрать, на стене — добавить'
+            : 'Кликните помещение, чтобы править его контур')}
       </div>
     </div>
+  );
+}
+
+/** Длина стороны в метрах у её середины. */
+function EdgeLabel({ a, b, unit }: { a: Pt; b: Pt; unit: number }) {
+  const len = dist(a, b);
+  if (len < unit * 30) return null;
+  return (
+    <text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - unit * 6} className="edge-len" fontSize={unit * 11}>
+      {fmt(len / 1000, 2)}
+    </text>
   );
 }

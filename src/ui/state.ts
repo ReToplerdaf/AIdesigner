@@ -7,7 +7,8 @@ export type Selection =
   | { kind: 'panel' }
   | null;
 
-export type Tool = 'select' | 'calibrate' | 'room';
+/** room — прямоугольник, poly — многоугольник по углам, stretch — правка контура за углы и стены. */
+export type Tool = 'select' | 'calibrate' | 'room' | 'poly' | 'stretch';
 
 export type Update = (fn: (p: Project) => Project) => void;
 

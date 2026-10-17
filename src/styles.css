@@ -205,3 +205,11 @@ table.groups tr.badrow td:first-child { box-shadow: inset 3px 0 var(--bad); }
 @media (max-width: 760px) {
   .app { grid-template-columns: 1fr; grid-template-areas: 'top' 'center' 'left' 'right'; grid-template-rows: auto 70vh auto auto; }
 }
+
+.status-line { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.status-line .bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.status-line .bar span { display: block; height: 100%; background: var(--accent); transition: width 0.2s; }
+.status-line.done .bar { display: none; }
+.status-line.error { color: var(--bad); }
+.status-line.error .bar { display: none; }
+.edge-len { text-anchor: middle; fill: var(--accent); font-weight: 600; font-family: var(--mono); pointer-events: none; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; }
