@@ -65,6 +65,17 @@ export interface DetectResult {
 const HOLLOW_HALF_MM = 300;
 /** Если на плане есть сплошные тёмные полосы такой толщины, стены нарисованы заливкой, мм. */
 const SOLID_WALL_MM = 60;
+/**
+ * Самый широкий проём в стене под 45°, мм. Шире не берём: косые линии мебели и дверных полотен похожи на торцы
+ * косых стен, и длинные диагональные мостики резали бы комнаты наискосок.
+ */
+const DIAG_GAP_MM = 1400;
+/** Наибольший проём между торцом перегородки и боком поперечной стены (дверь в углу). */
+const SIDE_GAP_MM = 1000;
+/** Наибольшая ширина окна, которое закрываем при поиске границы дома по коротким простенкам. */
+const WINDOW_MM = 2500;
+/** Тёмные области толще этого — заливка пола или чёрный фон, а не стена, мм. */
+const FILL_MM = 1000;
 /** Линии тоньше этого считаются графикой, а не стеной, мм. */
 const THIN_LINE_MM = 50;
 
@@ -87,8 +98,8 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
     const maxGapPx = maxGapMm / mmPerPx;
     const maxEndPx = Math.max(1.6 * wallPx, 3 * tMin, 3);
     const bridge = new Uint8Array(N);
-    let bridgedPx = bridgeGaps(wd, W, H, maxGapPx, maxEndPx, bridge, 1.5 * wallPx);
-    bridgedPx += bridgeDiagonal(wd, W, H, maxGapPx, maxEndPx, 3 * wallPx, bridge);
+    let bridgedPx = bridgeGaps(wd, W, H, maxGapPx, maxEndPx, bridge, 2, 1.5 * wallPx, true, SIDE_GAP_MM / mmPerPx);
+    bridgedPx += bridgeDiagonal(wd, W, H, Math.min(maxGapPx, DIAG_GAP_MM / mmPerPx), maxEndPx, 2, bridge);
     bridgedPx += bridgeSkewed(cv, walls, wallPx, maxGapPx, maxEndPx, bridge, keep);
 
     // Граница дома, если её задали: всё снаружи — стена. Окна любой ширины на наружных стенах
@@ -109,8 +120,7 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
       cv.erode(m, core, k);
       const cd = core.data as Uint8Array;
       const long = new Uint8Array(N);
-      bridgeGaps(wd, W, H, Math.max(W, H), maxEndPx, long, 1.5 * wallPx);
-      bridgeDiagonal(wd, W, H, Math.max(W, H), maxEndPx, 3 * wallPx, long);
+      bridgeGaps(wd, W, H, Math.max(W, H), maxEndPx, long, 2, 1.5 * wallPx);
       for (let i = 0; i < N && windows; i++)
         if (long[i] && !bridge[i] && inside[i] && !cd[i]) {
           bridge[i] = 1;
@@ -156,16 +166,25 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
 }
 
 /** Шаги 1–3: маска стен (255 — стена), оценка толщины стен и порог «тонких» линий, пиксели. */
-function wallMask(cv: OpenCV, plan: RasterPlan, keep: Keep, thinScale = 1): { walls: OpenCV; wallPx: number; tMin: number } {
+export function wallMask(cv: OpenCV, plan: RasterPlan, keep: Keep, thinScale = 1): { walls: OpenCV; wallPx: number; tMin: number } {
   const { width: W, height: H, mmPerPx } = plan;
     const src = keep(cv.matFromImageData({ data: plan.rgba, width: W, height: H }));
     const gray = keep(new cv.Mat());
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    // 1. Тёмное — 255. Порог Оцу, но не светлее 170: цветная заливка пола не должна стать стеной.
+    // 1. Всё, что заметно темнее бумаги, — 255. Стены бывают и чёрными, и светло-серыми (на обмерных планах
+    // заливка 170–195), поэтому порог считается от цвета листа, а не делит тёмное и светлое пополам.
     const ink = keep(new cv.Mat());
-    const otsu = cv.threshold(gray, ink, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
-    if (otsu > 170) cv.threshold(gray, ink, 170, 255, cv.THRESH_BINARY_INV);
+    const paper = grayPercentile(gray.data as Uint8Array, 0.9);
+    cv.threshold(gray, ink, Math.max(100, paper - 30), 255, cv.THRESH_BINARY_INV);
+    // Заливка пола (цветом или серым) толще любой стены: всё, во что пролезает квадрат FILL_MM, — не стена.
+    const fillPx = Math.round(FILL_MM / mmPerPx);
+    if (fillPx >= 5) {
+      const fill = keep(new cv.Mat());
+      const fk = keep(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(fillPx, fillPx)));
+      cv.morphologyEx(ink, fill, cv.MORPH_OPEN, fk);
+      cv.subtract(ink, fill, ink);
+    }
 
     // 2. Полые стены (две тонкие линии) заливаются, только если сплошных стен на плане нет:
     // иначе под заливку попадают замкнутые контуры мебели — ванна, унитаз, столешница — и режут комнату.
@@ -210,8 +229,11 @@ export async function detectOutline(cv: OpenCV, plan: RasterPlan, closeMm = 1200
     const wd = walls.data as Uint8Array;
     const bridge = new Uint8Array(W * H);
     const maxEnd = Math.max(1.6 * wallPx, 3 * tMin, 3);
-    bridgeGaps(wd, W, H, Math.max(W, H), maxEnd, bridge, 1.5 * wallPx);
-    bridgeDiagonal(wd, W, H, Math.max(W, H), maxEnd, 3 * wallPx, bridge);
+    bridgeGaps(wd, W, H, Math.max(W, H), maxEnd, bridge, 2, 1.5 * wallPx);
+    // Окна: тонкие линии остекления стёрты, а простенки у окна бывают короткими (косые эркеры) —
+    // для проёмов окна по ширине хватит торца, который хотя бы не уже своей толщины.
+    bridgeGaps(wd, W, H, WINDOW_MM / mmPerPx, maxEnd, bridge, 1, 0);
+    bridgeDiagonal(wd, W, H, WINDOW_MM / mmPerPx, maxEnd, 2, bridge);
     for (let i = 0; i < wd.length; i++) if (bridge[i]) wd[i] = 255;
     const closed = keep(new cv.Mat());
     const kPx = Math.max(3, Math.round(closeMm / mmPerPx));
@@ -284,6 +306,18 @@ function touchesBorder(stats: OpenCV, k: number, W: number, H: number): boolean 
   return s.left === 0 || s.top === 0 || s.left + s.width >= W || s.top + s.height >= H;
 }
 
+/** Яркость, темнее которой доля q пикселей картинки. */
+function grayPercentile(g: Uint8Array, q: number): number {
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < g.length; i++) hist[g[i]]++;
+  let acc = 0;
+  for (let v = 0; v < 256; v++) {
+    acc += hist[v];
+    if (acc >= q * g.length) return v;
+  }
+  return 255;
+}
+
 /** Значение distanceTransform, ниже которого лежит доля q тёмных пикселей. */
 function percentile(dist: Float32Array, mask: Uint8Array, q: number): number {
   const hist = new Uint32Array(512);
@@ -318,8 +352,10 @@ function dropSpecks(cv: OpenCV, walls: OpenCV, minPx: number, keep: <T extends {
 /**
  * Закрывает проёмы в стенах. Идём по строкам: промежуток между двумя участками стены длиной не больше maxGap
  * закрывается, если оба края — торцы горизонтальной стены: вертикальная толщина не больше maxEnd, а вдоль строки
- * стена тянется хотя бы на minAlong. Второе условие отсекает косые стены: строка пересекает их коротким отрезком,
- * и без него комнату между двумя скосами «зашило» бы поперёк. То же по столбцам для вертикальных стен.
+ * стена тянется хотя бы в alongRatio раз дальше своей толщины или хотя бы на minAlong. Второе условие отсекает
+ * косые стены: строка пересекает их коротким отрезком, и без него комнату между двумя скосами «зашило» бы поперёк.
+ * Короткий торец тонкой перегородки у двери (200 мм при толщине 100) проходит по первой части условия,
+ * простенок толстой наружной стены у окна — по второй. То же по столбцам для вертикальных стен.
  * Возвращает число закрытых пикселей.
  */
 export function bridgeGaps(
@@ -329,10 +365,38 @@ export function bridgeGaps(
   maxGap: number,
   maxEnd: number,
   out: Uint8Array,
+  alongRatio = 0,
   minAlong = 0,
+  junctions = true,
+  sideGap = 0,
 ): number {
+  const long = (along: number, across: number) => along >= Math.min(alongRatio * across, minAlong || Infinity);
   const vRun = runs(wall, W, H, false);
   const hRun = runs(wall, W, H, true);
+  /**
+   * Край стены у промежутка: 3 — свободный торец; 2 — торец у примыкания поперечной стены (дверь прямо у угла:
+   * сам крайний пиксель лежит в поперечной стене, а тонкая перегородка начинается за ней); 1 — просто бок
+   * поперечной стены (только для узких проёмов); 0 — не торец.
+   * back — шаг по индексу вглубь стены, limit — сколько шагов можно сделать, не выходя за край картинки.
+   */
+  const end = (i: number, back: number, limit: number, along: Uint32Array, across: Uint32Array): number => {
+    if (across[i] <= maxEnd) return long(along[i], across[i]) ? 3 : 0;
+    if (!junctions) return 0;
+    for (let j = 1, p = i + back; j <= Math.min(limit, maxEnd) && wall[p]; j++, p += back)
+      // За примыканием должна начинаться настоящая стена, длинная вдоль, а не штриховка или значок.
+      if (across[p] <= maxEnd) {
+        if (long(along[p], across[p]) && along[p] >= minAlong) return 2;
+        break;
+      }
+    return gapNow <= sideGap && along[i] <= maxEnd ? 1 : 0;
+  };
+  /**
+   * Свободный торец напротив чего угодно — дверь. Два примыкания друг напротив друга — дверь в прямой стене,
+   * но только узкая: иначе это коридор между выровненными перегородками. Бок напротив бока — всегда коридор.
+   */
+  const ok = (a: number, b: number) =>
+    a > 0 && b > 0 && (a === 3 || b === 3 || (a === 2 && b === 2 && gapNow <= sideGap));
+  let gapNow = 0;
   let count = 0;
   for (let y = 0; y < H; y++) {
     let last = -1;
@@ -340,10 +404,8 @@ export function bridgeGaps(
       const i = y * W + x;
       if (!wall[i]) continue;
       const gap = x - last - 1;
-      if (
-        last >= 0 && gap > 0 && gap <= maxGap &&
-        vRun[y * W + last] <= maxEnd && vRun[i] <= maxEnd && hRun[y * W + last] >= minAlong && hRun[i] >= minAlong
-      ) {
+      gapNow = gap;
+      if (last >= 0 && gap > 0 && gap <= maxGap && ok(end(y * W + last, -1, last, hRun, vRun), end(i, 1, W - 1 - x, hRun, vRun))) {
         for (let g = last + 1; g < x; g++) out[y * W + g] = 1;
         count += gap;
       }
@@ -356,10 +418,8 @@ export function bridgeGaps(
       const i = y * W + x;
       if (!wall[i]) continue;
       const gap = y - last - 1;
-      if (
-        last >= 0 && gap > 0 && gap <= maxGap &&
-        hRun[last * W + x] <= maxEnd && hRun[i] <= maxEnd && vRun[last * W + x] >= minAlong && vRun[i] >= minAlong
-      ) {
+      gapNow = gap;
+      if (last >= 0 && gap > 0 && gap <= maxGap && ok(end(last * W + x, -W, last, vRun, hRun), end(i, W, H - 1 - y, vRun, hRun))) {
         for (let g = last + 1; g < y; g++) out[g * W + x] = 1;
         count += gap;
       }
@@ -371,8 +431,8 @@ export function bridgeGaps(
 
 /**
  * То же для стен под 45° (скошенные углы, эркеры): идём по диагоналям. Торец косой стены — тонкий поперёк
- * (не толще maxEnd) и длинный вдоль (не короче minAlong); у прямых стен, пересечённых по диагонали, оба
- * размера около 1,4 толщины, поэтому коридоры и простенки диагональными мостиками не зашиваются.
+ * (не толще maxEnd) и вдоль в alongRatio раз длиннее, чем поперёк; у прямых стен, пересечённых по диагонали,
+ * оба размера одинаковы, поэтому коридоры и простенки диагональными мостиками не зашиваются.
  */
 export function bridgeDiagonal(
   wall: Uint8Array,
@@ -380,7 +440,7 @@ export function bridgeDiagonal(
   H: number,
   maxGap: number,
   maxEnd: number,
-  minAlong: number,
+  alongRatio: number,
   out: Uint8Array,
 ): number {
   const down = diagRuns(wall, W, H, 1); // вдоль (1, 1)
@@ -389,7 +449,7 @@ export function bridgeDiagonal(
   for (const dir of [1, -1] as const) {
     const along = dir === 1 ? down : up;
     const across = dir === 1 ? up : down;
-    const isEnd = (i: number) => across[i] * Math.SQRT2 <= maxEnd && along[i] * Math.SQRT2 >= minAlong;
+    const isEnd = (i: number) => across[i] * Math.SQRT2 <= maxEnd && along[i] >= alongRatio * across[i];
     forEachDiagonal(W, H, dir, (line) => {
       let last = -1;
       for (let j = 0; j < line.length; j++) {
@@ -459,7 +519,7 @@ function bridgeSkewed(
     const rot = keep(new cv.Mat());
     cv.warpAffine(walls, rot, toRot, new cv.Size(D, D), cv.INTER_NEAREST, cv.BORDER_CONSTANT, new cv.Scalar(0));
     const rb = new Uint8Array(D * D);
-    count += bridgeGaps(rot.data as Uint8Array, D, D, maxGap, maxEnd, rb, 3 * wallPx);
+    count += bridgeGaps(rot.data as Uint8Array, D, D, maxGap, maxEnd, rb, 3, 0, false);
     const bm = keep(cv.matFromArray(D, D, cv.CV_8UC1, rb.map((v) => v * 255)));
     // Мостик чуть толще, чтобы после поворота обратно в нём не осталось щелей между пикселями.
     cv.dilate(bm, bm, keep(cv.Mat.ones(3, 3, cv.CV_8U)));
