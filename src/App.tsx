@@ -81,6 +81,7 @@ export default function App() {
       ...p,
       image: p.image ? { ...p.image, mmPerPx: p.image.mmPerPx * k } : null,
       rooms: p.rooms.map((r) => ({ ...r, poly: r.poly.map(s) })),
+      outline: p.outline?.map(s),
       devices: p.devices.map((d) => ({ ...d, pos: s(d.pos) })),
       panel: s(p.panel),
     }));

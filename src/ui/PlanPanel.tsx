@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { area } from '../engine/geometry';
-import { detectRooms, newRooms, type DetectStage } from '../engine/roomDetect';
+import { detectOutline, detectRooms, newRooms, type DetectStage } from '../engine/roomDetect';
+import { rect } from '../engine/geometry';
 import { readLabel, unionBox } from '../engine/roomLabels';
 import { DEVICE_TYPES, ROOM_TYPES } from '../engine/norms';
 import { roomTypeFromText } from '../engine/classify';
 import type { Box, Project, Room, RoomType } from '../engine/types';
 import { loadOpenCV, rasterOf } from './opencv';
 import { loadOcr, ocrBox } from './ocr';
-import { labelStore } from './labelStore';
+import { planUi, usePlanUi } from './planUi';
 import { DRAG_MIME, fmt, type Selection, type Tool, type Update } from './state';
 
 type Status = { kind: 'busy' | 'done' | 'error'; pct: number; text: string };
@@ -54,19 +55,70 @@ export function PlanPanel(props: Props) {
   const [status, setStatus] = useState<Status | null>(null);
   const busy = status?.kind === 'busy';
 
+  const ui = usePlanUi();
+  const step = (pct: number, text: string) => setStatus({ kind: 'busy', pct, text });
+
+  /** OpenCV и пиксели подложки: общая подготовка обоих шагов анализа. */
+  const prepare = async (image: NonNullable<Project['image']>) => {
+    step(2, 'Загружаю библиотеку OpenCV…');
+    const { cv } = await loadOpenCV((f) =>
+      f == null ? step(70, 'Запускаю OpenCV…') : step(2 + f * 66, `Загружаю библиотеку OpenCV… ${Math.round(f * 100)}%`),
+    );
+    step(74, 'Готовлю изображение…');
+    await frame();
+    return { cv, raster: await rasterOf(image) };
+  };
+
+  /**
+   * Шаг 1 из 2: граница дома. Найденная (или прежняя, если уже правили) граница показывается на плане,
+   * пользователь двигает её углы и стены и подтверждает.
+   */
+  const findOutline = async (fresh: boolean) => {
+    const image = project.image;
+    if (!image) return;
+    try {
+      let outline = fresh ? undefined : project.outline;
+      if (!outline) {
+        const { cv, raster } = await prepare(image);
+        step(85, 'Ищу границу дома…');
+        await frame();
+        outline = (await detectOutline(cv, raster)) ?? undefined;
+      }
+      // Не нашлась — предлагаем рамку по краю картинки, её легко подтянуть к стенам.
+      const W = image.widthPx * image.mmPerPx;
+      const H = image.heightPx * image.mmPerPx;
+      const found = !!outline;
+      const o = outline ?? rect(W * 0.05, H * 0.05, W * 0.95, H * 0.95).map((p) => ({ x: Math.round(p.x), y: Math.round(p.y) }));
+      update((p) => ({ ...p, outline: o }));
+      setTool('select');
+      props.setSelection(null);
+      planUi.set({ outlineEdit: true });
+      setStatus({
+        kind: 'done',
+        pct: 100,
+        text: found
+          ? 'Шаг 1 из 2. Синяя линия — граница дома. Проверьте её: углы и стены можно тянуть, двойной клик добавляет или убирает угол.'
+          : 'Шаг 1 из 2. Границу дома найти не удалось, поставил рамку по краю плана. Подтяните её углы и стены к наружным стенам.',
+      });
+    } catch (e) {
+      setStatus({ kind: 'error', pct: 100, text: `Не получилось: ${(e as Error).message}` });
+    }
+  };
+
+  const cancelOutline = () => {
+    planUi.set({ outlineEdit: false });
+    setStatus(null);
+  };
+
+  /** Шаг 2 из 2: помещения внутри подтверждённой границы и их подписи. */
   const analyze = async () => {
     const image = project.image;
     if (!image) return;
-    const step = (pct: number, text: string) => setStatus({ kind: 'busy', pct, text });
-    step(2, 'Загружаю библиотеку OpenCV…');
+    planUi.set({ outlineEdit: false });
     try {
-      const { cv } = await loadOpenCV((f) =>
-        f == null ? step(70, 'Запускаю OpenCV…') : step(2 + f * 66, `Загружаю библиотеку OpenCV… ${Math.round(f * 100)}%`),
-      );
-      step(74, 'Готовлю изображение…');
-      await frame();
-      const raster = await rasterOf(image);
+      const { cv, raster } = await prepare(image);
       const res = await detectRooms(cv, raster, {
+        boundary: project.outline,
         onStage: async (st) => {
           step(...STAGES[st]);
           await frame();
@@ -141,13 +193,13 @@ export function PlanPanel(props: Props) {
     const image = project.image;
     if (!image) return;
     setPickStatus({ kind: 'busy', pct: 0, text: `Обведите на плане ${field === 'name' ? 'название' : 'площадь'} помещения «${room.name}». Esc — отмена.` });
-    labelStore.set({
+    planUi.set({
       highlight: null,
       pick: {
         roomId: room.id,
         field,
         onPick: async (box) => {
-          labelStore.set({ pick: null, highlight: box });
+          planUi.set({ pick: null, highlight: box });
           setPickStatus({ kind: 'busy', pct: 10, text: 'Загружаю распознавание текста…' });
           try {
             const worker = await loadOcr((f) => setPickStatus({ kind: 'busy', pct: 10 + f * 70, text: `Загружаю распознавание текста… ${Math.round(f * 100)}%` }));
@@ -178,16 +230,28 @@ export function PlanPanel(props: Props) {
   // Палочку отменили (Esc на плане) — убираем и подсказку.
   useEffect(
     () =>
-      labelStore.subscribe(() => {
-        if (!labelStore.get().pick) setPickStatus((st) => (st?.kind === 'busy' && st.pct === 0 ? null : st));
+      planUi.subscribe(() => {
+        if (!planUi.get().pick) setPickStatus((st) => (st?.kind === 'busy' && st.pct === 0 ? null : st));
       }),
     [],
   );
 
   const focusSrc = (room: Room, src: Box | undefined) => {
     props.setSelection({ kind: 'room', id: room.id });
-    labelStore.set({ highlight: src ?? null });
+    planUi.set({ highlight: src ?? null });
   };
+
+  const removeAll = () => {
+    if (!confirm(`Удалить все помещения (${project.rooms.length})? Приборы останутся на плане.`)) return;
+    update((p) => ({ ...p, rooms: [], devices: p.devices.map((d) => ({ ...d, roomId: null })) }));
+    props.setSelection(null);
+  };
+
+  // Выбранное помещение (кликом на плане) прокручивается в списке.
+  useEffect(() => {
+    if (selection?.kind !== 'room') return;
+    document.getElementById(`room-${selection.id}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [selection]);
 
   const removeRoom = (id: string) =>
     update((p) => ({
@@ -219,9 +283,23 @@ export function PlanPanel(props: Props) {
         <p className="muted small">
           Находит комнаты по стенам на подложке. Сначала задайте масштаб: по нему отличаются стены от линий мебели и проёмы от комнат.
         </p>
-        <button id="plan-analyze" className="btn primary small" disabled={!project.image || busy} onClick={analyze}>
-          Анализ
-        </button>
+        {!ui.outlineEdit ? (
+          <button id="plan-analyze" className="btn primary small" disabled={!project.image || busy} onClick={() => findOutline(false)}>
+            Анализ
+          </button>
+        ) : (
+          <div className="row">
+            <button id="outline-ok" className="btn primary small" onClick={analyze}>
+              Граница верна, искать помещения
+            </button>
+            <button className="btn ghost small" onClick={() => findOutline(true)}>
+              Найти заново
+            </button>
+            <button className="btn ghost small" onClick={cancelOutline}>
+              Отмена
+            </button>
+          </div>
+        )}
         {status && (
           <div className={`status-line ${status.kind}`} role="status">
             <div className="bar">
@@ -293,7 +371,14 @@ export function PlanPanel(props: Props) {
       </section>
 
       <section className="stack-s">
-        <h3>Помещения ({project.rooms.length})</h3>
+        <div className="row between">
+          <h3>Помещения ({project.rooms.length})</h3>
+          {project.rooms.length > 0 && (
+            <button id="rooms-clear" className="btn ghost small" onClick={removeAll}>
+              Удалить все
+            </button>
+          )}
+        </div>
         {project.rooms.length === 0 && <p className="muted small">Выберите инструмент «Помещение» в левом верхнем углу плана и обведите комнаты.</p>}
         {pickStatus && (
           <div className={`status-line ${pickStatus.kind}${pickStatus.pct === 0 ? ' hint' : ''}`} role="status">
@@ -310,6 +395,7 @@ export function PlanPanel(props: Props) {
             return (
               <div
                 key={r.id}
+                id={`room-${r.id}`}
                 className={`room-row${selection?.kind === 'room' && selection.id === r.id ? ' sel' : ''}`}
                 onClick={() => props.setSelection({ kind: 'room', id: r.id })}
               >
@@ -317,7 +403,7 @@ export function PlanPanel(props: Props) {
                   id={`rn-${r.id}`}
                   value={r.name}
                   onFocus={() => focusSrc(r, r.nameSrc)}
-                  onBlur={() => labelStore.set({ highlight: null })}
+                  onBlur={() => planUi.set({ highlight: null })}
                   onChange={(e) => {
                     const t = roomTypeFromText(e.target.value);
                     setRoom(r.id, t ? { name: e.target.value, type: t } : { name: e.target.value });
@@ -352,7 +438,7 @@ export function PlanPanel(props: Props) {
                       step={0.1}
                       value={r.planAreaM2 ?? ''}
                       onFocus={() => focusSrc(r, r.areaSrc)}
-                      onBlur={() => labelStore.set({ highlight: null })}
+                      onBlur={() => planUi.set({ highlight: null })}
                       onChange={(e) => setRoom(r.id, { planAreaM2: e.target.value === '' ? undefined : +e.target.value })}
                     />
                     м²

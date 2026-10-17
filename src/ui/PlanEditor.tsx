@@ -6,7 +6,7 @@ import { AUTO_PASSAGE, roomAt, withPassageSpec } from '../engine/placement';
 import { wallAngle } from '../engine/wall';
 import { sharedWalls, snapHole } from '../engine/passages';
 import type { Device, DeviceKind, DeviceTypeKey, Project, ProjectCalc, Pt, Room } from '../engine/types';
-import { labelStore, useLabelStore } from './labelStore';
+import { planUi, usePlanUi } from './planUi';
 import { DRAG_MIME, fmt, groupColor, type DragPayload, type Selection, type Tool, type Update } from './state';
 
 interface Props {
@@ -37,6 +37,8 @@ type Drag =
   | null;
 
 const R = 140;
+/** id для ручек границы дома вместо id помещения. */
+const OUTLINE = '__outline';
 let dropSeq = 0;
 
 /** Слой плана: всё сразу, только освещение (светильники и выключатели) или только силовая часть. */
@@ -94,7 +96,8 @@ export function PlanEditor(props: Props) {
   const [calPts, setCalPts] = useState<Pt[]>([]);
   const [polyPts, setPolyPts] = useState<Pt[]>([]);
   const [hover, setHover] = useState<Pt | null>(null);
-  const labels = useLabelStore();
+  const labels = usePlanUi();
+  const ui = labels;
   const [dropping, setDropping] = useState(false);
   const [layer, setLayer] = useState<Layer>(() => {
     try {
@@ -176,7 +179,7 @@ export function PlanEditor(props: Props) {
   // Палочка ждёт обводку подписи: Esc отменяет.
   useEffect(() => {
     if (!labels.pick) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && labelStore.set({ pick: null });
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && planUi.set({ pick: null });
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [labels.pick]);
@@ -193,15 +196,69 @@ export function PlanEditor(props: Props) {
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  const startHandle = (e: React.PointerEvent, kind: 'corner' | 'edge', room: Room, idx: number) => {
+  const startHandle = (e: React.PointerEvent, kind: 'corner' | 'edge', id: string, poly: Pt[], idx: number) => {
     if (e.button !== 0) return;
     e.stopPropagation();
     svgRef.current!.setPointerCapture(e.pointerId);
-    setDrag({ kind, roomId: room.id, idx, start: toSvg(e.clientX, e.clientY), orig: room.poly });
+    setDrag({ kind, roomId: id, idx, start: toSvg(e.clientX, e.clientY), orig: poly });
   };
 
+  /** Контур помещения или граница дома (id = OUTLINE). */
   const setRoomPoly = (id: string, poly: Pt[]) =>
-    update((pr) => ({ ...pr, rooms: pr.rooms.map((r) => (r.id === id ? { ...r, poly } : r)) }));
+    update((pr) =>
+      id === OUTLINE ? { ...pr, outline: poly } : { ...pr, rooms: pr.rooms.map((r) => (r.id === id ? { ...r, poly } : r)) },
+    );
+
+  /** Ручки правки контура: стороны (сдвиг, двойной клик — новый угол) и углы (растяжение, двойной клик — убрать). */
+  const handles = (id: string, poly: Pt[], color: string) => (
+    <g key={`h-${id}`}>
+      {poly.map((a, i) => {
+        const b = poly[(i + 1) % poly.length];
+        const cur = a.y === b.y ? 'ns-resize' : a.x === b.x ? 'ew-resize' : 'move';
+        return (
+          <g key={`e${i}`}>
+            <line
+              x1={a.x}
+              y1={a.y}
+              x2={b.x}
+              y2={b.y}
+              stroke="transparent"
+              strokeWidth={14}
+              vectorEffect="non-scaling-stroke"
+              style={{ cursor: cur }}
+              className="edge-handle"
+              onPointerDown={(e) => startHandle(e, 'edge', id, poly, i)}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                setRoomPoly(id, insertCorner(poly, i, toSvg(e.clientX, e.clientY)));
+              }}
+            />
+            <EdgeLabel a={a} b={b} unit={unit} color={color} />
+          </g>
+        );
+      })}
+      {poly.map((a, i) => (
+        <rect
+          key={`c${i}`}
+          x={a.x - unit * 5}
+          y={a.y - unit * 5}
+          width={unit * 10}
+          height={unit * 10}
+          fill="var(--surface)"
+          stroke={color}
+          strokeWidth={2}
+          vectorEffect="non-scaling-stroke"
+          style={{ cursor: 'move' }}
+          className="corner-handle"
+          onPointerDown={(e) => startHandle(e, 'corner', id, poly, i)}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            setRoomPoly(id, removeCorner(poly, i));
+          }}
+        />
+      ))}
+    </g>
+  );
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 && e.button !== 1) return;
@@ -305,7 +362,7 @@ export function PlanEditor(props: Props) {
       if (b.maxX - b.minX > 50 && b.maxY - b.minY > 30)
         labels.pick.onPick({ x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY });
     }
-    if (drag?.kind === 'corner' || drag?.kind === 'edge') {
+    if ((drag?.kind === 'corner' || drag?.kind === 'edge') && drag.roomId !== OUTLINE) {
       // Контур изменился — приборы у его границы могли оказаться в другом помещении.
       update((pr) => ({
         ...pr,
@@ -405,11 +462,23 @@ export function PlanEditor(props: Props) {
           const sel = selection?.kind === 'room' && selection.id === r.id;
           return (
             <g key={r.id}>
+              {sel && (
+                <polygon
+                  points={r.poly.map((p) => `${p.x},${p.y}`).join(' ')}
+                  fill="none"
+                  stroke="var(--accent)"
+                  strokeWidth={10}
+                  strokeOpacity={0.25}
+                  strokeLinejoin="round"
+                  vectorEffect="non-scaling-stroke"
+                  style={{ pointerEvents: 'none' }}
+                />
+              )}
               <polygon
                 points={r.poly.map((p) => `${p.x},${p.y}`).join(' ')}
-                fill={project.image ? 'transparent' : ROOM_FILL[r.type]}
+                fill={sel ? 'var(--accent-soft)' : project.image ? 'transparent' : ROOM_FILL[r.type]}
                 stroke={sel ? 'var(--accent)' : 'var(--wall)'}
-                strokeWidth={sel ? 3 : project.image ? 1.5 : 4}
+                strokeWidth={sel ? 3.5 : project.image ? 1.5 : 4}
                 vectorEffect="non-scaling-stroke"
                 onPointerDown={(e) => {
                   if ((tool === 'select' || tool === 'stretch') && e.button === 0) setTimeout(() => setSelection({ kind: 'room', id: r.id }));
@@ -556,6 +625,18 @@ export function PlanEditor(props: Props) {
           <title>Щит квартирный — перетащите, чтобы перенести</title>
         </g>
 
+        {ui.outlineEdit && project.outline && (
+          <polygon
+            className="outline"
+            points={project.outline.map((p) => `${p.x},${p.y}`).join(' ')}
+            fill="none"
+            stroke="var(--src)"
+            strokeWidth={3}
+            strokeDasharray="10 6"
+            vectorEffect="non-scaling-stroke"
+            style={{ pointerEvents: 'none' }}
+          />
+        )}
         {preview && (
           <polygon
             points={preview.map((p) => `${p.x},${p.y}`).join(' ')}
@@ -599,55 +680,8 @@ export function PlanEditor(props: Props) {
         {tool === 'stretch' &&
           project.rooms
             .filter((r) => selection?.kind === 'room' && selection.id === r.id)
-            .map((r) => (
-              <g key={`h-${r.id}`}>
-                {r.poly.map((a, i) => {
-                  const b = r.poly[(i + 1) % r.poly.length];
-                  const cur = a.y === b.y ? 'ns-resize' : a.x === b.x ? 'ew-resize' : 'move';
-                  return (
-                    <g key={`e${i}`}>
-                      <line
-                        x1={a.x}
-                        y1={a.y}
-                        x2={b.x}
-                        y2={b.y}
-                        stroke="transparent"
-                        strokeWidth={14}
-                        vectorEffect="non-scaling-stroke"
-                        style={{ cursor: cur }}
-                        className="edge-handle"
-                        onPointerDown={(e) => startHandle(e, 'edge', r, i)}
-                        onDoubleClick={(e) => {
-                          e.stopPropagation();
-                          setRoomPoly(r.id, insertCorner(r.poly, i, toSvg(e.clientX, e.clientY)));
-                        }}
-                      />
-                      <EdgeLabel a={a} b={b} unit={unit} />
-                    </g>
-                  );
-                })}
-                {r.poly.map((a, i) => (
-                  <rect
-                    key={`c${i}`}
-                    x={a.x - unit * 5}
-                    y={a.y - unit * 5}
-                    width={unit * 10}
-                    height={unit * 10}
-                    fill="var(--surface)"
-                    stroke="var(--accent)"
-                    strokeWidth={2}
-                    vectorEffect="non-scaling-stroke"
-                    style={{ cursor: 'move' }}
-                    className="corner-handle"
-                    onPointerDown={(e) => startHandle(e, 'corner', r, i)}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      setRoomPoly(r.id, removeCorner(r.poly, i));
-                    }}
-                  />
-                ))}
-              </g>
-            ))}
+            .map((r) => handles(r.id, r.poly, 'var(--accent)'))}
+        {ui.outlineEdit && project.outline && handles(OUTLINE, project.outline, 'var(--src)')}
         {calPts.map((p, i) => (
           <circle key={i} cx={p.x} cy={p.y} r={unit * 5} fill="var(--accent)" />
         ))}
@@ -669,7 +703,9 @@ export function PlanEditor(props: Props) {
         ))}
       </div>
       <div className="plan-hint">
-        {labels.pick ? (
+        {ui.outlineEdit && !labels.pick ? (
+          'Граница дома: тяните углы и стены, двойной клик добавляет или убирает угол. Затем «Граница верна» слева'
+        ) : labels.pick ? (
           `Обведите рамкой ${labels.pick.field === 'name' ? 'название' : 'площадь'} помещения на плане. Esc — отмена`
         ) : (
           <>
@@ -692,11 +728,11 @@ export function PlanEditor(props: Props) {
 }
 
 /** Длина стороны в метрах у её середины. */
-function EdgeLabel({ a, b, unit }: { a: Pt; b: Pt; unit: number }) {
+function EdgeLabel({ a, b, unit, color }: { a: Pt; b: Pt; unit: number; color?: string }) {
   const len = dist(a, b);
   if (len < unit * 30) return null;
   return (
-    <text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - unit * 6} className="edge-len" fontSize={unit * 11}>
+    <text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - unit * 6} className="edge-len" fontSize={unit * 11} style={color ? { fill: color } : undefined}>
       {fmt(len / 1000, 2)}
     </text>
   );
