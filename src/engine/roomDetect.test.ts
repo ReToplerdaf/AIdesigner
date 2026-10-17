@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { area, bbox } from './geometry';
-import { detectRooms, orthogonalize, type OpenCV, type RasterPlan } from './roomDetect';
+import { detectOutline, detectRooms, orthogonalize, type OpenCV, type RasterPlan } from './roomDetect';
 
 let cv: OpenCV;
 
@@ -95,15 +95,31 @@ describe('распознавание помещений', () => {
     for (const r of res.rooms) expect(m2(r.poly)).toBeGreaterThan(14);
   }, 30_000);
 
-  it('не считает помещением область, которая уходит за край через широкий проём', async () => {
+  it('комната с панорамным окном находится, когда задана граница дома', async () => {
+    // Комната 4,6 × 4,6 м, внизу окно 3 м — шире предела для проёмов (2,4 м).
     const s = sheet(600, 600);
     s.box(50, 50, 550, 70);
     s.box(50, 50, 70, 550);
     s.box(530, 50, 550, 550);
-    s.box(50, 530, 150, 550); // внизу проём 3,8 м — шире предела
-    s.box(530, 530, 550, 550);
-    const res = await detectRooms(cv, s.toPlan());
-    expect(res.rooms).toHaveLength(0);
+    s.box(50, 530, 150, 550);
+    s.box(450, 530, 550, 550);
+    for (let i = 0; i < 3; i++) s.box(150, 535 + i * 6, 450, 536 + i * 6); // переплёт окна тонкими линиями
+    const plan = s.toPlan();
+    expect((await detectRooms(cv, plan)).rooms).toHaveLength(0); // без границы утекает наружу
+
+    const outline = await detectOutline(cv, plan);
+    expect(outline).not.toBeNull();
+    const b = bbox(outline!);
+    expect(b.minX).toBeCloseTo(500, -2);
+    expect(b.maxX).toBeCloseTo(5500, -2);
+    expect(b.maxY).toBeCloseTo(5500, -2);
+    expect(outline).toHaveLength(4);
+
+    const res = await detectRooms(cv, plan, { boundary: outline! });
+    expect(res.rooms).toHaveLength(1);
+    expect(m2(res.rooms[0].poly)).toBeGreaterThan(20.5);
+    expect(m2(res.rooms[0].poly)).toBeLessThan(21.6);
+    expect(res.rooms[0].poly).toHaveLength(4); // без «кармана» в проёме окна
   }, 30_000);
 });
 

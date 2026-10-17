@@ -28,6 +28,8 @@ export interface DetectOptions {
   maxGapMm?: number;
   /** Меньшие области не считаются помещениями (шахты, ниши), м². */
   minAreaM2?: number;
+  /** Граница дома, мм: помещения ищутся только внутри неё. */
+  boundary?: Pt[];
   /** Вызывается перед каждым этапом, чтобы интерфейс успел показать состояние. */
   onStage?: (stage: DetectStage) => Promise<void> | void;
 }
@@ -66,6 +68,76 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
 
   try {
     await opts.onStage?.('walls');
+    const { walls, wallPx, tMin } = wallMask(cv, plan, keep);
+
+    // 4. Проёмы. Мостик ставится, только если по обе стороны — торцы стены, а не длинные стены поперёк:
+    // иначе узкий коридор или санузел «зашился» бы целиком.
+    await opts.onStage?.('gaps');
+    const wd = walls.data as Uint8Array;
+    const maxGapPx = maxGapMm / mmPerPx;
+    const maxEndPx = Math.max(1.6 * wallPx, 3 * tMin, 3);
+    const bridge = new Uint8Array(N);
+    let bridgedPx = bridgeGaps(wd, W, H, maxGapPx, maxEndPx, bridge);
+
+    // Граница дома, если её задали: всё снаружи — стена. Окна любой ширины на наружных стенах
+    // закрываются мостиком вдоль границы, поэтому комната с панорамным окном не «вытекает» наружу.
+    let inside: Uint8Array | null = null;
+    if (opts.boundary && opts.boundary.length >= 3) {
+      const m = keep(cv.Mat.zeros(H, W, cv.CV_8UC1));
+      const pts = keep(cv.matFromArray(opts.boundary.length, 1, cv.CV_32SC2, opts.boundary.flatMap((p) => [Math.round(p.x / mmPerPx), Math.round(p.y / mmPerPx)])));
+      const vec = keep(new cv.MatVector());
+      vec.push_back(pts);
+      cv.fillPoly(m, vec, new cv.Scalar(255));
+      inside = m.data as Uint8Array;
+      // Полоса вдоль границы шириной в пару толщин стены: только в ней ставим длинные мостики.
+      const core = keep(new cv.Mat());
+      const r = Math.max(3, Math.round(wallPx * 2.5));
+      const k = keep(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(2 * r + 1, 2 * r + 1)));
+      cv.erode(m, core, k);
+      const cd = core.data as Uint8Array;
+      const long = new Uint8Array(N);
+      bridgeGaps(wd, W, H, Math.max(W, H), maxEndPx, long);
+      for (let i = 0; i < N; i++)
+        if (long[i] && !bridge[i] && inside[i] && !cd[i]) {
+          bridge[i] = 1;
+          bridgedPx++;
+        }
+    }
+
+    // 5. Помещения — связные свободные области, не выходящие на край картинки.
+    await opts.onStage?.('rooms');
+    const free = keep(new cv.Mat(H, W, cv.CV_8UC1));
+    const fd = free.data as Uint8Array;
+    for (let i = 0; i < N; i++) fd[i] = wd[i] || bridge[i] || (inside && !inside[i]) ? 0 : 255;
+    const lab2 = keep(new cv.Mat());
+    const st2 = keep(new cv.Mat());
+    const ce2 = keep(new cv.Mat());
+    const n2 = cv.connectedComponentsWithStats(free, lab2, st2, ce2, 4, cv.CV_32S);
+    const l2 = lab2.data32S as Int32Array;
+    const firstPx = new Int32Array(n2).fill(-1);
+    for (let i = 0; i < N; i++) if (firstPx[l2[i]] < 0) firstPx[l2[i]] = i;
+
+    const rooms: DetectedRoom[] = [];
+    const eps = Math.max(1.5, 40 / mmPerPx);
+    for (let k = 1; k < n2; k++) {
+      const s = stat(st2, k);
+      if (s.area < minAreaPx || s.area > 0.6 * N || touchesBorder(st2, k, W, H)) continue;
+      const poly = contourOf(cv, l2, W, k, s, eps, keep);
+      if (!poly || poly.length < 3) continue;
+      const fp = firstPx[k];
+      const at = { x: ((fp % W) + 0.5) * mmPerPx, y: (Math.floor(fp / W) + 0.5) * mmPerPx };
+      const mm = orthogonalize(poly).map((p) => ({ x: Math.round(p.x * mmPerPx), y: Math.round(p.y * mmPerPx) }));
+      if (mm.length >= 3 && polyArea(mm) > 0) rooms.push({ poly: mm, inside: at });
+    }
+    return { rooms, wallMm: Math.round(wallPx * mmPerPx), bridgedPx };
+  } finally {
+    for (const m of mats) m.delete();
+  }
+}
+
+/** Шаги 1–3: маска стен (255 — стена), оценка толщины стен и порог «тонких» линий, пиксели. */
+function wallMask(cv: OpenCV, plan: RasterPlan, keep: Keep): { walls: OpenCV; wallPx: number; tMin: number } {
+  const { width: W, height: H, mmPerPx } = plan;
     const src = keep(cv.matFromImageData({ data: plan.rgba, width: W, height: H }));
     const gray = keep(new cv.Mat());
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
@@ -99,45 +171,61 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
     } else solid.copyTo(walls);
     dropSpecks(cv, walls, Math.max(20, (150 / mmPerPx) ** 2), keep);
 
-    // 4. Проёмы. Мостик ставится, только если по обе стороны — торцы стены, а не длинные стены поперёк:
-    // иначе узкий коридор или санузел «зашился» бы целиком.
-    await opts.onStage?.('gaps');
+    return { walls, wallPx, tMin };
+}
+
+/**
+ * Граница всего дома (квартиры) по наружному контуру стен, мм. Проёмы любой ширины между торцами стен
+ * (панорамные окна, входная дверь) закрываются мостиками, оставшиеся мелкие щели — замыканием на closeMm.
+ * Результат — предложение: пользователь правит его и подтверждает.
+ */
+export async function detectOutline(cv: OpenCV, plan: RasterPlan, closeMm = 1200): Promise<Pt[] | null> {
+  const { width: W, height: H, mmPerPx } = plan;
+  const mats: { delete(): void }[] = [];
+  const keep: Keep = (m) => (mats.push(m), m);
+  try {
+    const { walls, wallPx, tMin } = wallMask(cv, plan, keep);
     const wd = walls.data as Uint8Array;
-    const maxGapPx = maxGapMm / mmPerPx;
-    const maxEndPx = Math.max(1.6 * wallPx, 3 * tMin, 3);
-    const bridge = new Uint8Array(N);
-    const bridgedPx = bridgeGaps(wd, W, H, maxGapPx, maxEndPx, bridge);
-
-    // 5. Помещения — связные свободные области, не выходящие на край картинки.
-    await opts.onStage?.('rooms');
-    const free = keep(new cv.Mat(H, W, cv.CV_8UC1));
-    const fd = free.data as Uint8Array;
-    for (let i = 0; i < N; i++) fd[i] = wd[i] || bridge[i] ? 0 : 255;
-    const lab2 = keep(new cv.Mat());
-    const st2 = keep(new cv.Mat());
-    const ce2 = keep(new cv.Mat());
-    const n2 = cv.connectedComponentsWithStats(free, lab2, st2, ce2, 4, cv.CV_32S);
-    const l2 = lab2.data32S as Int32Array;
-    const firstPx = new Int32Array(n2).fill(-1);
-    for (let i = 0; i < N; i++) if (firstPx[l2[i]] < 0) firstPx[l2[i]] = i;
-
-    const rooms: DetectedRoom[] = [];
-    const eps = Math.max(1.5, 40 / mmPerPx);
-    for (let k = 1; k < n2; k++) {
-      const s = stat(st2, k);
-      if (s.area < minAreaPx || s.area > 0.6 * N || touchesBorder(st2, k, W, H)) continue;
-      const poly = contourOf(cv, l2, W, k, s, eps, keep);
-      if (!poly || poly.length < 3) continue;
-      const fp = firstPx[k];
-      const inside = { x: ((fp % W) + 0.5) * mmPerPx, y: (Math.floor(fp / W) + 0.5) * mmPerPx };
-      const mm = orthogonalize(poly).map((p) => ({ x: Math.round(p.x * mmPerPx), y: Math.round(p.y * mmPerPx) }));
-      if (mm.length >= 3 && polyArea(mm) > 0) rooms.push({ poly: mm, inside });
+    const bridge = new Uint8Array(W * H);
+    bridgeGaps(wd, W, H, Math.max(W, H), Math.max(1.6 * wallPx, 3 * tMin, 3), bridge);
+    for (let i = 0; i < wd.length; i++) if (bridge[i]) wd[i] = 255;
+    const closed = keep(new cv.Mat());
+    const kPx = Math.max(3, Math.round(closeMm / mmPerPx));
+    const k = keep(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(kPx, kPx)));
+    // Поле вокруг картинки, чтобы замыкание у краёв не прилипало к границе листа.
+    const padded = keep(new cv.Mat());
+    cv.copyMakeBorder(walls, padded, kPx, kPx, kPx, kPx, cv.BORDER_CONSTANT, new cv.Scalar(0));
+    cv.morphologyEx(padded, closed, cv.MORPH_CLOSE, k);
+    const contours = keep(new cv.MatVector());
+    const hier = keep(new cv.Mat());
+    cv.findContours(closed, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    let best = -1;
+    let bestA = 0;
+    for (let i = 0; i < contours.size(); i++) {
+      const c = contours.get(i);
+      const a = cv.contourArea(c);
+      if (a > bestA) {
+        bestA = a;
+        best = i;
+      }
+      c.delete();
     }
-    return { rooms, wallMm: Math.round(wallPx * mmPerPx), bridgedPx };
+    if (best < 0 || bestA < 0.02 * W * H) return null;
+    const c = contours.get(best);
+    const approx = keep(new cv.Mat());
+    cv.approxPolyDP(c, approx, Math.max(2, 120 / mmPerPx), true);
+    c.delete();
+    const d = approx.data32S as Int32Array;
+    const pts: Pt[] = [];
+    for (let i = 0; i < d.length; i += 2) pts.push({ x: d[i] - kPx + 0.5, y: d[i + 1] - kPx + 0.5 });
+    const mm = orthogonalize(pts).map((p) => ({ x: Math.round(p.x * mmPerPx), y: Math.round(p.y * mmPerPx) }));
+    return mm.length >= 3 ? mm : null;
   } finally {
     for (const m of mats) m.delete();
   }
 }
+
+type Keep = <T extends { delete(): void }>(m: T) => T;
 
 /** Заливает замкнутые светлые области, узкие по всей длине (расстояние до линии ≤ halfPx): полости полых стен. */
 function fillHollow(cv: OpenCV, ink: OpenCV, solid: OpenCV, halfPx: number, keep: <T extends { delete(): void }>(m: T) => T) {
