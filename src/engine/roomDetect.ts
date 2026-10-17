@@ -70,6 +70,8 @@ const SOLID_WALL_MM = 60;
  * косых стен, и длинные диагональные мостики резали бы комнаты наискосок.
  */
 const DIAG_GAP_MM = 1400;
+/** Наибольший проём между торцом перегородки и боком поперечной стены (дверь в углу). */
+const SIDE_GAP_MM = 1000;
 /** Тёмные области толще этого — заливка пола или чёрный фон, а не стена, мм. */
 const FILL_MM = 1000;
 /** Линии тоньше этого считаются графикой, а не стеной, мм. */
@@ -94,7 +96,7 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
     const maxGapPx = maxGapMm / mmPerPx;
     const maxEndPx = Math.max(1.6 * wallPx, 3 * tMin, 3);
     const bridge = new Uint8Array(N);
-    let bridgedPx = bridgeGaps(wd, W, H, maxGapPx, maxEndPx, bridge, 2, 1.5 * wallPx);
+    let bridgedPx = bridgeGaps(wd, W, H, maxGapPx, maxEndPx, bridge, 2, 1.5 * wallPx, true, SIDE_GAP_MM / mmPerPx);
     bridgedPx += bridgeDiagonal(wd, W, H, Math.min(maxGapPx, DIAG_GAP_MM / mmPerPx), maxEndPx, 2, bridge);
     bridgedPx += bridgeSkewed(cv, walls, wallPx, maxGapPx, maxEndPx, bridge, keep);
 
@@ -361,6 +363,7 @@ export function bridgeGaps(
   alongRatio = 0,
   minAlong = 0,
   junctions = true,
+  sideGap = 0,
 ): number {
   const long = (along: number, across: number) => along >= Math.min(alongRatio * across, minAlong || Infinity);
   const vRun = runs(wall, W, H, false);
@@ -373,6 +376,8 @@ export function bridgeGaps(
   const end = (i: number, back: number, limit: number, along: Uint32Array, across: Uint32Array): number => {
     if (across[i] <= maxEnd) return long(along[i], across[i]) ? 2 : 0;
     if (!junctions) return 0;
+    // Бок поперечной стены (дверь в углу, напротив торца перегородки) — только для узких проёмов.
+    if (gapNow <= sideGap && along[i] <= maxEnd) return 1;
     for (let j = 1, p = i + back; j <= Math.min(limit, maxEnd) && wall[p]; j++, p += back)
       // За примыканием должна начинаться настоящая стена, длинная вдоль, а не штриховка или значок.
       if (across[p] <= maxEnd) return long(along[p], across[p]) && along[p] >= minAlong ? 1 : 0;
@@ -380,6 +385,7 @@ export function bridgeGaps(
   };
   // Хотя бы один край — свободный торец: два примыкания друг напротив друга — это коридор, а не дверь.
   const ok = (a: number, b: number) => a > 0 && b > 0 && a + b >= 3;
+  let gapNow = 0;
   let count = 0;
   for (let y = 0; y < H; y++) {
     let last = -1;
@@ -387,6 +393,7 @@ export function bridgeGaps(
       const i = y * W + x;
       if (!wall[i]) continue;
       const gap = x - last - 1;
+      gapNow = gap;
       if (last >= 0 && gap > 0 && gap <= maxGap && ok(end(y * W + last, -1, last, hRun, vRun), end(i, 1, W - 1 - x, hRun, vRun))) {
         for (let g = last + 1; g < x; g++) out[y * W + g] = 1;
         count += gap;
@@ -400,6 +407,7 @@ export function bridgeGaps(
       const i = y * W + x;
       if (!wall[i]) continue;
       const gap = y - last - 1;
+      gapNow = gap;
       if (last >= 0 && gap > 0 && gap <= maxGap && ok(end(last * W + x, -W, last, vRun, hRun), end(i, W, H - 1 - y, vRun, hRun))) {
         for (let g = last + 1; g < y; g++) out[g * W + x] = 1;
         count += gap;
