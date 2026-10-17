@@ -1,7 +1,7 @@
 // Автораскладка: позиции спецификации → помещения → точки на плане.
 // Правила простые и предсказуемые; инженер затем двигает точки вручную.
 
-import { area, bbox, centroid, perimeter, pointInPolygon, pointOnPerimeter } from './geometry';
+import { area, bbox, centroid, dist, perimeter, pointInPolygon, pointOnPerimeter } from './geometry';
 import { roomTypeFromText } from './classify';
 import { nearestWallPoint } from './wall';
 import { findPassages } from './passages';
@@ -63,6 +63,12 @@ export function matchRooms(hint: string, rooms: Room[]): Room[] {
   return t ? rooms.filter((r) => r.type === t) : [];
 }
 
+/** Помещения позиции спецификации: заданное явно или найденное по подсказке. */
+export function specRooms(item: Pick<SpecItem, 'roomId' | 'roomHint'>, rooms: Room[]): Room[] {
+  const own = item.roomId ? rooms.find((r) => r.id === item.roomId) : undefined;
+  return own ? [own] : matchRooms(item.roomHint, rooms);
+}
+
 function roomsByType(rooms: Room[], types: RoomType[]): Room[] {
   for (const t of types) {
     const found = rooms.filter((r) => r.type === t);
@@ -76,6 +82,12 @@ function allocate(item: SpecItem, rooms: Room[]): Map<string, number> {
   const res = new Map<string, number>();
   if (rooms.length === 0) return res;
   const add = (r: Room, n: number) => n > 0 && res.set(r.id, (res.get(r.id) ?? 0) + n);
+
+  const own = item.roomId ? rooms.find((r) => r.id === item.roomId) : undefined;
+  if (own) {
+    add(own, item.qty);
+    return res;
+  }
 
   const hinted = matchRooms(item.roomHint, rooms);
   if (hinted.length) {
@@ -124,10 +136,36 @@ function lightGrid(room: Room, n: number): Pt[] {
   return pts;
 }
 
+/** Отступ точки «в углу» от угла вдоль стены, мм. */
+const CORNER_OFFSET = 350;
+
+/** Положения у выпуклых углов помещения: по одному на угол, отступ вдоль следующей стены. */
+export function cornerSpots(poly: Pt[], inset = WALL_INSET): Pt[] {
+  const total = perimeter(poly);
+  const spots: Pt[] = [];
+  let run = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const v = poly[i];
+    const prev = poly[(i - 1 + poly.length) % poly.length];
+    const next = poly[(i + 1) % poly.length];
+    const lp = dist(prev, v) || 1;
+    const ln = dist(v, next) || 1;
+    const probe = {
+      x: v.x + ((prev.x - v.x) / lp + (next.x - v.x) / ln) * 50,
+      y: v.y + ((prev.y - v.y) / lp + (next.y - v.y) / ln) * 50,
+    };
+    if (total > 0 && pointInPolygon(probe, poly)) {
+      spots.push(pointOnPerimeter(poly, (run + Math.min(CORNER_OFFSET, ln / 3)) / total, inset));
+    }
+    run += ln;
+  }
+  return spots;
+}
+
 /** Сначала крупные приборы, потом бытовые розетки — так приборы встают в начало периметра. */
 const WALL_ORDER: DeviceTypeKey[] = [
-  'hob', 'oven', 'dishwasher', 'washer', 'boiler', 'ac', 'floor_heating',
-  'hood', 'fridge', 'microwave', 'other', 'socket',
+  'hob', 'hood', 'oven', 'dishwasher', 'washer', 'boiler', 'ac', 'floor_heating',
+  'fridge', 'microwave', 'other', 'socket',
 ];
 
 /** Выключатель, который добавляется автоматически в помещение со светильниками. */
@@ -222,8 +260,15 @@ export function autoPlace(
     const entry = nearestWallPoint(room.poly, panel, WALL_INSET);
     switches.forEach((p, i) => devices.push(make(p, { x: entry.x + i * 250, y: entry.y })));
 
+    // Позиции «по углам»: по одной на угол, остальные идут вдоль стен вместе со всеми.
+    const corners = cornerSpots(room.poly);
+    const atCorners = list.filter((p) => p.item.place === 'corners' && DEVICE_TYPES[p.item.typeKey].kind !== 'light');
+    const cornerSet = new Set(atCorners.slice(0, corners.length));
+    const used = pickEven(corners.length, cornerSet.size);
+    [...cornerSet].forEach((p, i) => devices.push(make(p, corners[used[i]])));
+
     const wall = list
-      .filter((p) => DEVICE_TYPES[p.item.typeKey].kind !== 'light')
+      .filter((p) => DEVICE_TYPES[p.item.typeKey].kind !== 'light' && !cornerSet.has(p))
       .sort((a, b) => WALL_ORDER.indexOf(a.item.typeKey) - WALL_ORDER.indexOf(b.item.typeKey));
     const m = wall.length;
     // Небольшой сдвиг старта, чтобы точки не попадали в углы.
@@ -237,6 +282,11 @@ export function autoPlace(
     for (const w of findPassages(rooms)) devices.push(make({ item, roomId: null }, w.pos));
   }
   return devices;
+}
+
+/** m индексов из n, равномерно по кругу. */
+function pickEven(n: number, m: number): number[] {
+  return Array.from({ length: m }, (_, i) => Math.floor((i * n) / m));
 }
 
 /** Помещение, в котором оказалась точка после перетаскивания. */

@@ -1,4 +1,5 @@
 import type { Project } from '../engine/types';
+import { clonePresets, STANDARD_PRESETS, type PresetTable } from '../engine/presets';
 
 export type Selection =
   | { kind: 'device'; id: string }
@@ -58,3 +59,24 @@ export const fmt = (v: number, d = 1) =>
 /** Перетаскивание из списка на план: позиция спецификации или тип прибора без спецификации. */
 export const DRAG_MIME = 'application/x-aid-device';
 export type DragPayload = { specId: string } | { typeKey: string };
+
+const PRESETS_KEY = 'aidesigner.presets.v1';
+
+/** Свой стандарт типовых наборов хранится в браузере; без него — стандартный объект. */
+export function loadPresets(): PresetTable {
+  try {
+    const raw = localStorage.getItem(PRESETS_KEY);
+    if (raw) return { ...clonePresets(STANDARD_PRESETS), ...(JSON.parse(raw) as PresetTable) };
+  } catch {
+    // нет доступа к localStorage — работаем со стандартными наборами
+  }
+  return clonePresets(STANDARD_PRESETS);
+}
+
+export function savePresets(t: PresetTable) {
+  try {
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(t));
+  } catch {
+    // не сохранилось — наборы останутся до перезагрузки страницы
+  }
+}

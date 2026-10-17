@@ -84,6 +84,10 @@ export interface SpecItem {
   roomHint: string;
   /** Насколько уверенно распознан тип: 1 — по ключевому слову, 0 — не распознан. */
   confidence: number;
+  /** Конкретное помещение на плане (строка создана из типового набора). Важнее roomHint. */
+  roomId?: string;
+  /** Как ставить у стен: 'corners' — по углам помещения. */
+  place?: 'corners';
 }
 
 export interface Device {

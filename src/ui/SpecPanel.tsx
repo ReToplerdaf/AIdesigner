@@ -3,11 +3,13 @@ import * as XLSX from 'xlsx';
 import { parseSpecRows, splitText } from '../engine/classify';
 import { DEVICE_TYPES } from '../engine/norms';
 import { pruneUnusedHoles } from '../engine/calc';
-import { autoPlace, matchRooms, roomAt, withPassageSpec } from '../engine/placement';
+import { autoPlace, roomAt, specRooms, withPassageSpec } from '../engine/placement';
+import { generateSpec, type PresetTable } from '../engine/presets';
 import { pointOnPerimeter } from '../engine/geometry';
 import type { DeviceTypeKey, SpecItem } from '../engine/types';
 import { DEMO_SPEC_TEXT } from '../data/demo';
-import { DRAG_MIME, fmt, type Selection, type Update } from './state';
+import { DRAG_MIME, fmt, loadPresets, savePresets, type Selection, type Update } from './state';
+import { PresetsEditor } from './PresetsEditor';
 import type { Project } from '../engine/types';
 
 interface Props {
@@ -20,6 +22,12 @@ interface Props {
 export function SpecPanel({ project, update, selection, setSelection }: Props) {
   const [text, setText] = useState('');
   const [error, setError] = useState('');
+  const [presets, setPresetsState] = useState<PresetTable>(loadPresets);
+  const [editingPresets, setEditingPresets] = useState(false);
+  const setPresets = (t: PresetTable) => {
+    setPresetsState(t);
+    savePresets(t);
+  };
 
   const setSpec = (spec: SpecItem[]) => update((p) => ({ ...p, spec }));
 
@@ -42,18 +50,25 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
   const edit = (id: string, patch: Partial<SpecItem>) =>
     update((p) => ({ ...p, spec: p.spec.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
 
-  const place = () =>
-    update((p) => {
-      // Если щит стоит вне помещений, ставим его в прихожую (или в первое помещение) у стены.
-      let panel = p.panel;
-      if (p.rooms.length && !roomAt(panel, p.rooms)) {
-        const r = p.rooms.find((x) => x.type === 'hall') ?? p.rooms[0];
-        panel = pointOnPerimeter(r.poly, 0.02, 300);
-      }
-      const all = autoPlace(p.spec, p.rooms, panel, { autoSwitches: p.settings.autoSwitches ?? true });
-      const { devices } = pruneUnusedHoles({ ...p, panel, devices: all });
-      return { ...p, panel, devices, spec: withPassageSpec(p.spec, devices) };
-    });
+  /** Раскладка спецификации по плану: заменяет все точки. */
+  const withPlacement = (p: Project): Project => {
+    // Если щит стоит вне помещений, ставим его в прихожую (или в первое помещение) у стены.
+    let panel = p.panel;
+    if (p.rooms.length && !roomAt(panel, p.rooms)) {
+      const r = p.rooms.find((x) => x.type === 'hall') ?? p.rooms[0];
+      panel = pointOnPerimeter(r.poly, 0.02, 300);
+    }
+    const all = autoPlace(p.spec, p.rooms, panel, { autoSwitches: p.settings.autoSwitches ?? true });
+    const { devices } = pruneUnusedHoles({ ...p, panel, devices: all });
+    return { ...p, panel, devices, spec: withPassageSpec(p.spec, devices) };
+  };
+  const place = () => update(withPlacement);
+
+  const generate = () => {
+    if (project.spec.length && !confirm('Заменить текущую спецификацию и точки на плане позициями из типовых наборов?')) return;
+    update((p) => withPlacement({ ...p, spec: generateSpec(p.rooms, presets) }));
+  };
+  const untyped = project.rooms.filter((r) => r.type === 'other').length;
 
   // Прибор, выбранный на плане: его позиция поднимается наверх списка, внизу плашки — удаление точки.
   const picked = selection?.kind === 'device' ? project.devices.find((d) => d.id === selection.id) : undefined;
@@ -84,8 +99,30 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
   const holes = project.devices.filter((d) => d.typeKey === 'passage').length;
   const total = project.spec.reduce((s, i) => s + (i.typeKey === 'passage' ? holes : i.qty), 0);
 
+  if (editingPresets) {
+    return <PresetsEditor table={presets} setTable={setPresets} project={project} onClose={() => setEditingPresets(false)} />;
+  }
+
   return (
     <div className="stack">
+      <div className="gen-box">
+        <strong>Нет спецификации?</strong>
+        <p className="muted small">
+          Составим её по помещениям на плане: каждое получит типовой набор своего типа (свет, выключатель, розетки, техника) и сразу разложится.
+        </p>
+        <div className="row">
+          <button id="gen-spec" className="btn primary" onClick={generate} disabled={project.rooms.length === 0}>
+            Сгенерировать по помещениям
+          </button>
+          <button id="edit-presets" className="btn" onClick={() => setEditingPresets(true)}>
+            Типовые наборы…
+          </button>
+        </div>
+        {project.rooms.length === 0 && <p className="muted small">Сначала задайте помещения на вкладке «План».</p>}
+        {untyped > 0 && (
+          <p className="small bad">Помещений с типом «Прочее»: {untyped}. Укажите тип на вкладке «План», иначе они получат общий набор.</p>
+        )}
+      </div>
       <p className="muted">
         Загрузите Excel или CSV, либо вставьте строки из Excel. Колонки: наименование, количество, мощность, помещение
         (необязательно).
@@ -130,7 +167,7 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
               </div>
             )}
             {ordered.map((s) => {
-              const rooms = matchRooms(s.roomHint, project.rooms);
+              const rooms = specRooms(s, project.rooms);
               const isHole = s.typeKey === 'passage';
               const placed = isHole
                 ? project.devices.filter((d) => d.typeKey === 'passage').length
@@ -160,10 +197,10 @@ export function SpecPanel({ project, update, selection, setSelection }: Props) {
                     <span className="unit">кВт</span>
                   </div>
                   <div className="spec-room">
-                    <select id={`r-${s.id}`} value={rooms[0]?.name ?? ''} onChange={(e) => edit(s.id, { roomHint: e.target.value })}>
+                    <select id={`r-${s.id}`} value={rooms[0]?.id ?? ''} onChange={(e) => edit(s.id, { roomHint: project.rooms.find((r) => r.id === e.target.value)?.name ?? '', roomId: e.target.value || undefined })}>
                       <option value="">Помещение: авто</option>
                       {project.rooms.map((r) => (
-                        <option key={r.id} value={r.name}>{r.name}</option>
+                        <option key={r.id} value={r.id}>{r.name}</option>
                       ))}
                     </select>
                     <span className="muted small">
