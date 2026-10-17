@@ -8,7 +8,7 @@ import { PlanPanel } from './ui/PlanPanel';
 import { SpecPanel } from './ui/SpecPanel';
 import { SettingsPanel } from './ui/SettingsPanel';
 import { CableLog, GroupsTable, Inspector, PanelSummary, SingleLine, toCsv } from './ui/Results';
-import { download, loadSaved, save, type Selection, type Tool } from './ui/state';
+import { download, loadSaved, rescale, save, type Selection, type Tool } from './ui/state';
 
 type LeftTab = 'plan' | 'spec' | 'settings';
 type RightTab = 'calc' | 'sld' | 'cables';
@@ -75,16 +75,7 @@ export default function App() {
 
   const applyCalibration = (realMm: number) => {
     if (!pendingCal) return;
-    const k = realMm / dist(pendingCal.a, pendingCal.b);
-    const s = (q: Pt) => ({ x: Math.round(q.x * k), y: Math.round(q.y * k) });
-    update((p) => ({
-      ...p,
-      image: p.image ? { ...p.image, mmPerPx: p.image.mmPerPx * k } : null,
-      rooms: p.rooms.map((r) => ({ ...r, poly: r.poly.map(s) })),
-      outline: p.outline?.map(s),
-      devices: p.devices.map((d) => ({ ...d, pos: s(d.pos) })),
-      panel: s(p.panel),
-    }));
+    update((p) => rescale(p, realMm / dist(pendingCal.a, pendingCal.b)));
     setPendingCal(null);
     setTool('room');
     setFitSignal((n) => n + 1);
@@ -146,6 +137,7 @@ export default function App() {
               pendingCalibration={pendingCal ? dist(pendingCal.a, pendingCal.b) : null}
               applyCalibration={applyCalibration}
               cancelCalibration={() => setPendingCal(null)}
+              onRescaled={() => setFitSignal((n) => n + 1)}
             />
           )}
           {left === 'spec' && <SpecPanel project={project} update={update} selection={selection} setSelection={setSelection} />}
