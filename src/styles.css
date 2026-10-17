@@ -106,13 +106,13 @@ textarea { width: 100%; font-family: var(--mono); font-size: 12px; resize: verti
 .calib input { width: 100px; }
 
 .rooms { display: flex; flex-direction: column; gap: 4px; }
-.room-row { border: 1px solid transparent; display: grid; grid-template-columns: 1fr 22px 110px 20px; gap: 4px 6px; align-items: center; padding: 3px; border-radius: 4px; }
+.room-row { border: 1px solid transparent; display: grid; grid-template-columns: 1fr 22px 104px 22px 20px; gap: 4px 6px; align-items: center; padding: 3px; border-radius: 4px; }
 .room-sub { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .room-sub label { display: inline-flex; align-items: center; gap: 4px; }
 .room-sub input { width: 58px; font-size: 12px; padding: 1px 4px; }
 .room-sub .warn { color: var(--bad); }
 .room-sub .warn input { border-color: var(--bad); }
-.icon.wand { display: inline-flex; align-items: center; justify-content: center; color: var(--accent); }
+.icon.wand, .icon.cut { display: inline-flex; align-items: center; justify-content: center; color: var(--accent); }
 .icon.wand:hover { color: var(--ink); }
 .icon.wand:disabled { opacity: 0.35; }
 .status-line.hint .bar { display: none; }
@@ -244,3 +244,9 @@ table.groups tr.badrow td:first-child { box-shadow: inset 3px 0 var(--bad); }
 .preset-item .row.small { gap: 10px; }
 input.tiny { width: 44px; padding: 1px 4px; }
 .preset-actions { border-top: 1px solid var(--line); padding-top: 10px; }
+
+/* Кнопка «удалить угол» у выбранного угла контура */
+.corner-del { cursor: pointer; }
+.corner-del circle { fill: #e03131; stroke: #fff; stroke-width: 1.5px; vector-effect: non-scaling-stroke; }
+.corner-del path { stroke: #fff; stroke-width: 2px; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.corner-del:hover circle { fill: #c92a2a; }

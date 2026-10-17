@@ -117,3 +117,17 @@ export function readLabel(words: OcrWord[], minConf = 45): RoomLabel {
   }
   return out;
 }
+
+/** Все подписи площади в распознанных словах: в слитом контуре смежных помещений их несколько. */
+export function readAreas(words: OcrWord[], minConf = 45): { m2: number; box: Box }[] {
+  const ok = words.filter((w) => w.conf >= minConf && w.text.trim());
+  const out: { m2: number; box: Box }[] = [];
+  for (let i = 0; i < ok.length; i++) {
+    const next = ok[i + 1]?.line === ok[i].line ? ok[i + 1].text : '';
+    const m2 = areaOf(ok[i].text, next);
+    if (m2 == null) continue;
+    const unit = /^м/i.test(next.trim()) ? [ok[i + 1].box] : [];
+    out.push({ m2, box: unionBox([ok[i].box, ...unit]) });
+  }
+  return out;
+}
