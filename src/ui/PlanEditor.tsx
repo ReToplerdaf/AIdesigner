@@ -662,6 +662,35 @@ export function PlanEditor(props: Props) {
             style={{ pointerEvents: 'none' }}
           />
         )}
+        {labels.measure && (
+          <g className="measure" style={{ pointerEvents: 'none' }}>
+            <line
+              x1={labels.measure.a.x}
+              y1={labels.measure.a.y}
+              x2={labels.measure.b.x}
+              y2={labels.measure.b.y}
+              stroke="var(--src)"
+              strokeWidth={3}
+              vectorEffect="non-scaling-stroke"
+            />
+            {[labels.measure.a, labels.measure.b].map((p, i) => (
+              <circle key={i} cx={p.x} cy={p.y} r={unit * 5} fill="var(--src)" />
+            ))}
+            <text
+              x={(labels.measure.a.x + labels.measure.b.x) / 2}
+              y={(labels.measure.a.y + labels.measure.b.y) / 2 - unit * 10}
+              textAnchor="middle"
+              fontSize={unit * 16}
+              fontWeight={600}
+              fill="var(--src)"
+              stroke="var(--bg, #fff)"
+              strokeWidth={unit * 4}
+              paintOrder="stroke"
+            >
+              {labels.measure.label}
+            </text>
+          </g>
+        )}
         {tool === 'poly' && polyPts.length > 0 && (
           <g style={{ pointerEvents: 'none' }}>
             <polyline

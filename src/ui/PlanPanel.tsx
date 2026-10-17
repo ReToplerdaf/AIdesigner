@@ -8,8 +8,9 @@ import { roomTypeFromText } from '../engine/classify';
 import type { Box, Project, Room, RoomType } from '../engine/types';
 import { loadOpenCV, rasterOf } from './opencv';
 import { loadOcr, ocrBox } from './ocr';
+import { crossCheck, findScale, segMm, type ScaleCandidate } from './scaleFind';
 import { planUi, usePlanUi } from './planUi';
-import { DRAG_MIME, fmt, type Selection, type Tool, type Update } from './state';
+import { DRAG_MIME, fmt, rescale, type Selection, type Tool, type Update } from './state';
 
 type Status = { kind: 'busy' | 'done' | 'error'; pct: number; text: string };
 
@@ -48,6 +49,8 @@ interface Props {
   pendingCalibration: number | null;
   applyCalibration: (realMm: number) => void;
   cancelCalibration: () => void;
+  /** Масштаб подложки поменялся: план надо заново вписать в окно. */
+  onRescaled: () => void;
 }
 
 export function PlanPanel(props: Props) {
@@ -57,6 +60,101 @@ export function PlanPanel(props: Props) {
 
   const ui = usePlanUi();
   const step = (pct: number, text: string) => setStatus({ kind: 'busy', pct, text });
+
+  // Масштаб без калибровки: найденные варианты показываются по одному, пока пользователь не подтвердит.
+  const [scaleStatus, setScaleStatus] = useState<Status | null>(null);
+  const [scaleCands, setScaleCands] = useState<{ list: ScaleCandidate[]; i: number } | null>(null);
+  const scaleBusy = scaleStatus?.kind === 'busy';
+  const scaleCand = scaleCands ? scaleCands.list[scaleCands.i] : null;
+  // Последние находки по этой подложке: ими же проверяется масштаб, заданный вручную.
+  const [found, setFound] = useState<{ dataUrl: string; list: ScaleCandidate[] } | null>(null);
+
+  const report = (by: string, mmPerPx: number, list: ScaleCandidate[]) => {
+    const checks = crossCheck(mmPerPx, list);
+    const bad = checks.filter((c) => !c.ok).length;
+    setScaleStatus({
+      kind: bad ? 'error' : 'done',
+      pct: 100,
+      text:
+        `Масштаб задан ${by}. ` +
+        (checks.length === 0
+          ? 'Сверить не с чем: размеров и площадей на плане не нашлось.'
+          : `Сверка: ${checks.map((c) => `${c.ok ? '✓' : '✗'} ${c.text}`).join('; ')}.` +
+            (bad ? ' Есть расхождения: проверьте масштаб.' : '')),
+    });
+  };
+
+  const showCandidate = (list: ScaleCandidate[], i: number, image: NonNullable<Project['image']>) => {
+    if (i >= list.length) {
+      setScaleCands(null);
+      planUi.set({ highlight: null, measure: null });
+      setScaleStatus({
+        kind: 'done',
+        pct: 100,
+        text: list.length ? 'Других вариантов нет. Задайте масштаб вручную: две точки и длина.' : 'Размеров и площадей на плане не нашлось. Задайте масштаб вручную: две точки и длина.',
+      });
+      setTool('calibrate');
+      return;
+    }
+    setScaleCands({ list, i });
+    setScaleStatus(null);
+    const k = image.mmPerPx;
+    const c = list[i];
+    const m = c.mark;
+    const len = Math.round(segMm(c, c.mmPerPx) / 10) * 10;
+    planUi.set({
+      highlight: { x: m.x * k, y: m.y * k, w: m.w * k, h: m.h * k },
+      measure: { a: { x: c.seg.a.x * k, y: c.seg.a.y * k }, b: { x: c.seg.b.x * k, y: c.seg.b.y * k }, label: `${len.toLocaleString('ru-RU')} мм` },
+    });
+  };
+
+  const searchScale = async (image: NonNullable<Project['image']>) => {
+    setScaleCands(null);
+    try {
+      const list = await findScale(image, (pct, text) => setScaleStatus({ kind: 'busy', pct, text }));
+      setFound({ dataUrl: image.dataUrl, list });
+      showCandidate(list, 0, image);
+    } catch (e) {
+      setScaleStatus({ kind: 'error', pct: 100, text: `Не получилось: ${(e as Error).message}. Задайте масштаб вручную.` });
+      setTool('calibrate');
+    }
+  };
+
+  const acceptScale = () => {
+    const image = project.image;
+    if (!image || !scaleCands || !scaleCand) return;
+    update((p) => rescale(p, scaleCand.mmPerPx / image.mmPerPx));
+    props.onRescaled();
+    planUi.set({ highlight: null, measure: null });
+    setScaleCands(null);
+    report(`по «${scaleCand.text}»`, scaleCand.mmPerPx, scaleCands.list.filter((c) => c !== scaleCand));
+  };
+
+  const rejectScale = () => project.image && scaleCands && showCandidate(scaleCands.list, scaleCands.i + 1, project.image);
+
+  /** Ручная калибровка по двум точкам: применяем и так же сверяем с найденными размерами и площадями. */
+  const applyManual = async (realMm: number) => {
+    const image = project.image;
+    if (!image || props.pendingCalibration == null) return;
+    const mmPerPx = image.mmPerPx * (realMm / props.pendingCalibration);
+    props.applyCalibration(realMm);
+    const by = `вручную: ${realMm.toLocaleString('ru-RU')} мм`;
+    if (found?.dataUrl === image.dataUrl) return report(by, mmPerPx, found.list);
+    try {
+      const list = await findScale(image, (pct, text) => setScaleStatus({ kind: 'busy', pct, text: `Проверяю масштаб. ${text}` }));
+      setFound({ dataUrl: image.dataUrl, list });
+      report(by, mmPerPx, list);
+    } catch (e) {
+      setScaleStatus({ kind: 'error', pct: 100, text: `Масштаб задан ${by}, проверить не удалось: ${(e as Error).message}.` });
+    }
+  };
+
+  const manualScale = () => {
+    setScaleCands(null);
+    setScaleStatus(null);
+    planUi.set({ highlight: null, measure: null });
+    setTool('calibrate');
+  };
 
   /** OpenCV и пиксели подложки: общая подготовка обоих шагов анализа. */
   const prepare = async (image: NonNullable<Project['image']>) => {
@@ -171,11 +269,10 @@ export function PlanPanel(props: Props) {
       img.onload = () => {
         // Предварительный масштаб: ширина картинки ≈ 12 м. Точный задаётся калибровкой.
         const mmPerPx = 12000 / img.naturalWidth;
-        update((p) => ({
-          ...p,
-          image: { dataUrl: String(reader.result), widthPx: img.naturalWidth, heightPx: img.naturalHeight, mmPerPx },
-        }));
-        setTool('calibrate');
+        const image = { dataUrl: String(reader.result), widthPx: img.naturalWidth, heightPx: img.naturalHeight, mmPerPx };
+        update((p) => ({ ...p, image }));
+        setTool('select');
+        searchScale(image);
       };
       img.src = String(reader.result);
     };
@@ -278,6 +375,49 @@ export function PlanPanel(props: Props) {
         </div>
       </section>
 
+      {project.image && (
+        <section className="stack-s">
+          <h3>Масштаб</h3>
+          {!scaleCand && (
+            <>
+              <p className="muted small">Ищется сам по размерным линиям и подписанным площадям комнат. Можно задать и вручную.</p>
+              <div className="row">
+                <button id="scale-find" className="btn small" disabled={scaleBusy} onClick={() => project.image && searchScale(project.image)}>
+                  Найти масштаб
+                </button>
+                <button className="btn ghost small" disabled={scaleBusy} onClick={manualScale}>
+                  Вручную
+                </button>
+              </div>
+            </>
+          )}
+          {scaleCand && project.image && (
+            <div className="calib" id="scale-candidate">
+              <span>
+                {scaleCand.kind === 'dim'
+                  ? `Размер «${scaleCand.text}»: его линия подсвечена на плане.`
+                  : `Комната с площадью «${scaleCand.text}» подсвечена, отрезок от стены до стены получается ${fmt(segMm(scaleCand, scaleCand.mmPerPx), 0)} мм.`}{' '}
+                Тогда план {fmt((project.image.widthPx * scaleCand.mmPerPx) / 1000, 1)} × {fmt((project.image.heightPx * scaleCand.mmPerPx) / 1000, 1)} м
+                {scaleCand.support ? `, с этим согласны ещё ${scaleCand.support} находк${scaleCand.support === 1 ? 'а' : scaleCand.support < 5 ? 'и' : 'ок'}.` : '.'}
+              </span>
+              <div className="row">
+                <button id="scale-ok" className="btn primary small" onClick={acceptScale}>Верно</button>
+                <button id="scale-next" className="btn ghost small" onClick={rejectScale}>Нет, другой</button>
+                <button className="btn ghost small" onClick={manualScale}>Вручную</button>
+              </div>
+            </div>
+          )}
+          {scaleStatus && (
+            <div className={`status-line ${scaleStatus.kind}`} role="status">
+              <div className="bar">
+                <span style={{ width: `${scaleStatus.pct}%` }} />
+              </div>
+              <span>{scaleStatus.text}</span>
+            </div>
+          )}
+        </section>
+      )}
+
       <section className="stack-s">
         <h3>Распознавание помещений</h3>
         <p className="muted small">
@@ -335,7 +475,7 @@ export function PlanPanel(props: Props) {
               onSubmit={(e) => {
                 e.preventDefault();
                 const v = +(new FormData(e.currentTarget).get('len') as string);
-                if (v > 0) props.applyCalibration(v);
+                if (v > 0) applyManual(v);
               }}
             >
               <span>Отрезок сейчас {fmt(props.pendingCalibration, 0)} мм. Реальная длина:</span>

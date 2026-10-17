@@ -1,4 +1,4 @@
-import type { Project } from '../engine/types';
+import type { Project, Pt } from '../engine/types';
 import { clonePresets, STANDARD_PRESETS, type PresetTable } from '../engine/presets';
 
 export type Selection =
@@ -12,6 +12,19 @@ export type Selection =
 export type Tool = 'select' | 'calibrate' | 'room' | 'poly' | 'stretch';
 
 export type Update = (fn: (p: Project) => Project) => void;
+
+/** Новый масштаб подложки: всё нарисованное на ней растягивается в k раз, чтобы остаться на своих местах. */
+export function rescale(p: Project, k: number): Project {
+  const s = (q: Pt) => ({ x: Math.round(q.x * k), y: Math.round(q.y * k) });
+  return {
+    ...p,
+    image: p.image ? { ...p.image, mmPerPx: p.image.mmPerPx * k } : null,
+    rooms: p.rooms.map((r) => ({ ...r, poly: r.poly.map(s) })),
+    outline: p.outline?.map(s),
+    devices: p.devices.map((d) => ({ ...d, pos: s(d.pos) })),
+    panel: s(p.panel),
+  };
+}
 
 const PALETTE = [
   '#d9480f', '#1971c2', '#2b8a3e', '#9c36b5', '#e67700', '#0c8599',
