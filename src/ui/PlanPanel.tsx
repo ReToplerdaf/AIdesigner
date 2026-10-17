@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
-import { area } from '../engine/geometry';
-import { detectOutline, detectRooms, fitToAreas, newRooms, type DetectStage } from '../engine/roomDetect';
+import { useEffect, useRef, useState } from 'react';
+import { area, pointInPolygon } from '../engine/geometry';
+import { detectOutline, detectRooms, fitToAreas, newRooms, type DetectStage, type RasterPlan } from '../engine/roomDetect';
+import { growRooms, looksMerged, snapLine, splitByAreas, splitPoly, type AreaMark } from '../engine/roomSplit';
 import { rect } from '../engine/geometry';
-import { readLabel, unionBox } from '../engine/roomLabels';
+import { readAreas, readLabel, unionBox, type OcrWord } from '../engine/roomLabels';
 import { DEVICE_TYPES, ROOM_TYPES } from '../engine/norms';
 import { roomTypeFromText } from '../engine/classify';
-import type { Box, Project, Room, RoomType } from '../engine/types';
+import type { Box, Project, Pt, Room, RoomType } from '../engine/types';
 import { loadOpenCV, rasterOf } from './opencv';
 import { loadOcr, ocrBox } from './ocr';
 import { planUi, usePlanUi } from './planUi';
@@ -33,7 +34,38 @@ const WAND = (
   </svg>
 );
 
+const SCISSORS = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+    <circle cx="6" cy="6" r="3" />
+    <circle cx="6" cy="18" r="3" />
+    <path d="M8.1 8.1L20 20M8.1 15.9L20 4" />
+  </svg>
+);
+
 const bboxOf = (poly: { x: number; y: number }[]): Box => unionBox(poly.map((p) => ({ x: p.x, y: p.y, w: 0, h: 0 })));
+const centerOf = (b: Box): Pt => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+
+/** Название, тип и площадь помещения из распознанных в нём слов. */
+function labelRoom(r: Room, words: OcrWord[]) {
+  const l = readLabel(words);
+  if (l.name) Object.assign(r, { name: l.name.text, type: l.name.type, nameSrc: l.name.box });
+  if (l.area) Object.assign(r, { planAreaM2: l.area.m2, areaSrc: l.area.box });
+}
+
+/** Названия у каждой из подписей площади, через «+»: «Кухня + Гостиная». */
+function namesOf(words: OcrWord[], marks: AreaMark[]): string {
+  return marks
+    .map((m) => readLabel(words.filter((w) => Math.hypot(centerOf(w.box).x - m.at.x, centerOf(w.box).y - m.at.y) < 1500)).name?.text)
+    .filter(Boolean)
+    .join(' + ');
+}
+
+/** Слитый контур смежных помещений, границу которых проводит пользователь. */
+interface SplitTask {
+  roomId: string;
+  marks: AreaMark[];
+  words: OcrWord[];
+}
 
 /** Даёт браузеру перерисовать строку состояния перед тяжёлым шагом. */
 const frame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
@@ -56,6 +88,10 @@ export function PlanPanel(props: Props) {
   const busy = status?.kind === 'busy';
 
   const ui = usePlanUi();
+  // Свежий проект и пиксели подложки для обработчиков, которые срабатывают позже (линия границы на плане).
+  const projRef = useRef(project);
+  projRef.current = project;
+  const rasterRef = useRef<{ key: string; raster: RasterPlan } | null>(null);
   const step = (pct: number, text: string) => setStatus({ kind: 'busy', pct, text });
 
   /** OpenCV и пиксели подложки: общая подготовка обоих шагов анализа. */
@@ -66,7 +102,9 @@ export function PlanPanel(props: Props) {
     );
     step(74, 'Готовлю изображение…');
     await frame();
-    return { cv, raster: await rasterOf(image) };
+    const raster = await rasterOf(image);
+    rasterRef.current = { key: image.dataUrl, raster };
+    return { cv, raster };
   };
 
   /**
@@ -130,36 +168,43 @@ export function PlanPanel(props: Props) {
 
       // Подписи: каждая комната читается отдельно, внутри своего контура, — так не мешают соседи и стены.
       let ocrNote = '';
+      const wordsOf = new Map<Room, OcrWord[]>();
       if (made.length) {
         try {
           const worker = await loadOcr((f) => step(95 + f * 2, `Загружаю распознавание текста… ${Math.round(f * 100)}%`));
           for (let i = 0; i < made.length; i++) {
             step(97 + (3 * i) / made.length, `Читаю подписи… ${i + 1} из ${made.length}`);
             const r = made[i];
-            const l = readLabel(await ocrBox(worker, image, bboxOf(r.poly), 11, r.poly));
-            if (l.name) Object.assign(r, { name: l.name.text, type: l.name.type, nameSrc: l.name.box });
-            if (l.area) Object.assign(r, { planAreaM2: l.area.m2, areaSrc: l.area.box });
+            const words = await ocrBox(worker, image, bboxOf(r.poly), 11, r.poly);
+            wordsOf.set(r, words);
+            labelRoom(r, words);
           }
         } catch (e) {
           ocrNote = ` Подписи прочитать не удалось: ${(e as Error).message}.`;
         }
+      }
+      // Смежные помещения без стены: в контуре несколько подписей площади, и их сумма сходится с контуром.
+      const merged = new Map<Room, AreaMark[]>();
+      for (const r of made) {
+        const marks = readAreas(wordsOf.get(r) ?? []).map((a) => ({ at: centerOf(a.box), m2: a.m2, box: a.box }));
+        if (looksMerged(r.poly, marks)) merged.set(r, marks);
       }
       // Площадь с подписи — проверка: где контур с ней расходится, план распознаётся заново с другой очисткой линий
       // и проёмов, и берётся вариант, площадь которого ближе к подписи.
       let fitted = 0;
       const targets = made
         .map((r, i) => ({ r, i }))
-        .filter(({ r }) => r.planAreaM2 && r.areaSrc && Math.abs(area(r.poly) / 1e6 - r.planAreaM2) / r.planAreaM2 > 0.02);
+        .filter(({ r }) => !merged.has(r) && r.planAreaM2 && r.areaSrc && Math.abs(area(r.poly) / 1e6 - r.planAreaM2) / r.planAreaM2 > 0.02);
       if (targets.length) {
         const others = [
           ...fresh.map((f) => f.inside),
-          ...project.rooms.map((r) => bboxOf(r.poly)).map((b) => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 })),
+          ...project.rooms.map((r) => centerOf(bboxOf(r.poly))),
         ];
         const res2 = await fitToAreas(
           cv,
           raster,
           { boundary: project.outline },
-          targets.map(({ r }) => ({ inside: { x: r.areaSrc!.x + r.areaSrc!.w / 2, y: r.areaSrc!.y + r.areaSrc!.h / 2 }, m2: r.planAreaM2!, poly: r.poly })),
+          targets.map(({ r }) => ({ inside: centerOf(r.areaSrc!), m2: r.planAreaM2!, poly: r.poly })),
           others,
           0.02,
           async (v, n) => {
@@ -174,6 +219,43 @@ export function PlanPanel(props: Props) {
           fitted++;
         });
       }
+      // Слитые помещения делятся: по линии на плане, а если её нет — растут одновременно от своих подписей.
+      // Что не удалось разделить ни так, ни так, остаётся одним контуром, и границу просим провести вручную.
+      let split = 0;
+      let grown = 0;
+      const queue: SplitTask[] = [];
+      for (const [r, marks] of merged) {
+        step(99, 'Разделяю смежные помещения…');
+        await frame();
+        const words = wordsOf.get(r) ?? [];
+        const out: Room[] = [];
+        for (const part of splitByAreas(raster, r.poly, marks)) {
+          const sub = part.marks.map((i) => marks[i]);
+          let polys: Pt[][] | null = part.ok ? [part.poly] : growRooms(cv, raster, part.poly, sub);
+          if (polys && !part.ok) {
+            // Выросшие части принимаются, только если их площади близки к подписям.
+            if (polys.some((q, j) => Math.abs(area(q) / 1e6 - sub[j].m2) / sub[j].m2 > 0.1)) polys = null;
+            else grown += polys.length;
+          }
+          if (!polys) {
+            const room: Room = { ...r, id: `${r.id}m${out.length}`, poly: part.poly };
+            labelRoom(room, words.filter((w) => pointInPolygon(centerOf(w.box), part.poly)));
+            room.name = namesOf(words, sub) || room.name;
+            queue.push({ roomId: room.id, marks: sub, words });
+            out.push(room);
+            continue;
+          }
+          polys.forEach((q, j) => {
+            const room: Room = { id: `${r.id}s${out.length}`, name: '', type: 'other', poly: q };
+            labelRoom(room, words.filter((w) => pointInPolygon(centerOf(w.box), q)));
+            const m = part.ok ? sub[0] : sub[j];
+            if (m) Object.assign(room, { planAreaM2: m.m2, areaSrc: m.box });
+            out.push(room);
+          });
+        }
+        split += out.length - 1;
+        made.splice(made.indexOf(r), 1, ...out);
+      }
       const named = made.filter((r) => r.name).length;
       update((p) => ({
         ...p,
@@ -186,9 +268,12 @@ export function PlanPanel(props: Props) {
         text:
           res.rooms.length === 0
             ? 'Помещения не найдены. Проверьте масштаб или обведите комнаты вручную.'
-            : `Найдено помещений: ${res.rooms.length}, добавлено: ${fresh.length}${skipped ? ` (${skipped} уже были на плане)` : ''}. ` +
-              `Названия прочитаны у ${named} из ${fresh.length}.${fitted ? ` По площади с подписи уточнено контуров: ${fitted}.` : ''}${ocrNote} Проверьте их ниже, контуры правьте инструментом «Растянуть».`,
+            : `Найдено помещений: ${res.rooms.length}, добавлено: ${made.length}${skipped ? ` (${skipped} уже были на плане)` : ''}. ` +
+              `Названия прочитаны у ${named} из ${made.length}.${fitted ? ` По площади с подписи уточнено контуров: ${fitted}.` : ''}` +
+              `${split ? ` Смежных помещений без стены разделено: ${split}${grown ? ` (граница по площадям, проверьте её)` : ''}.` : ''}` +
+              `${ocrNote} Проверьте их ниже, контуры правьте инструментом «Растянуть».`,
       });
+      if (queue.length) askSplit(queue);
     } catch (e) {
       setStatus({ kind: 'error', pct: 100, text: `Не получилось: ${(e as Error).message}` });
     }
@@ -257,14 +342,73 @@ export function PlanPanel(props: Props) {
     });
   };
 
-  // Палочку отменили (Esc на плане) — убираем и подсказку.
+  // Палочку или разделение отменили (Esc на плане) — убираем и подсказку.
   useEffect(
     () =>
       planUi.subscribe(() => {
-        if (!planUi.get().pick) setPickStatus((st) => (st?.kind === 'busy' && st.pct === 0 ? null : st));
+        const { pick, split } = planUi.get();
+        if (!pick && !split) setPickStatus((st) => (st?.kind === 'busy' && st.pct === 0 ? null : st));
       }),
     [],
   );
+
+  /** Просим провести границу: по очереди для каждого слитого контура. Без подписей — просто разрезать помещение. */
+  const askSplit = (queue: SplitTask[]) => {
+    const [task, ...rest] = queue;
+    const room = task && projRef.current.rooms.find((r) => r.id === task.roomId);
+    if (!task) return planUi.set({ split: null });
+    if (!room) return askSplit(rest);
+    props.setSelection({ kind: 'room', id: room.id });
+    setTool('select');
+    setPickStatus({
+      kind: 'busy',
+      pct: 0,
+      text: task.marks.length
+        ? `В помещении «${room.name}» несколько подписей площади (${task.marks.map((m) => `${fmt(m.m2)} м²`).join(', ')}), ` +
+          'а стены и линии между ними на плане нет. Укажите примерную границу смежных комнат: проведите линию на плане. Esc — пропустить.'
+        : `Проведите на плане линию, по которой разделить «${room.name}». Esc — отмена.`,
+    });
+    planUi.set({ pick: null, split: { roomId: room.id, onLine: (a, b) => void applySplit(task, rest, a, b) } });
+  };
+
+  const applySplit = async (task: SplitTask, rest: SplitTask[], a: Pt, b: Pt) => {
+    const pr = projRef.current;
+    const room = pr.rooms.find((r) => r.id === task.roomId);
+    if (!room || !pr.image) return;
+    const fail = (text: string) => setPickStatus({ kind: 'error', pct: 100, text });
+    if (rasterRef.current?.key !== pr.image.dataUrl) rasterRef.current = { key: pr.image.dataUrl, raster: await rasterOf(pr.image) };
+    const [p, q] = snapLine(rasterRef.current.raster, room.poly, a, b, task.marks.flatMap((m) => (m.box ? [m.box] : [])));
+    const halves = splitPoly(room.poly, p, q).filter((h) => h.length >= 3 && area(h) > 0.3e6);
+    if (halves.length < 2) return fail('Линия не делит помещение на две части. Проведите её через всю комнату, от стены до стены.');
+    const sides = halves.map((h) => task.marks.filter((m) => pointInPolygon(m.at, h)));
+    if (task.marks.length >= 2 && sides.some((s) => !s.length))
+      return fail('Все подписи площади оказались по одну сторону линии. Проведите границу между ними.');
+    const next: SplitTask[] = [];
+    const rooms = halves.map((h, i): Room => {
+      const r: Room = { ...room, id: i ? `${room.id}h${Date.now().toString(36)}` : room.id, poly: h, planAreaM2: undefined, areaSrc: undefined };
+      if (!task.marks.length) return i ? { ...r, name: `${room.name} 2`, nameSrc: undefined } : r;
+      const words = task.words.filter((w) => pointInPolygon(centerOf(w.box), h));
+      Object.assign(r, { name: '', type: 'other', nameSrc: undefined });
+      labelRoom(r, words);
+      if (sides[i].length === 1) Object.assign(r, { planAreaM2: sides[i][0].m2, areaSrc: sides[i][0].box });
+      else next.push({ roomId: r.id, marks: sides[i], words: task.words });
+      if (sides[i].length > 1) r.name = namesOf(task.words, sides[i]) || room.name;
+      if (!r.name) r.name = room.name;
+      return r;
+    });
+    update((pp) => ({
+      ...pp,
+      rooms: pp.rooms.flatMap((r) => (r.id === room.id ? rooms : [r])),
+      devices: pp.devices.map((d) => (d.roomId === room.id ? { ...d, roomId: rooms.find((r) => pointInPolygon(d.pos, r.poly))?.id ?? room.id } : d)),
+    }));
+    if (next.length || rest.length) {
+      // Проект обновится к следующему кадру — тогда и спрашиваем дальше.
+      void frame().then(() => askSplit([...next, ...rest]));
+    } else {
+      planUi.set({ split: null });
+      setPickStatus({ kind: 'done', pct: 100, text: `Помещение разделено: ${rooms.map((r) => `«${r.name}»`).join(' и ')}.` });
+    }
+  };
 
   const focusSrc = (room: Room, src: Box | undefined) => {
     props.setSelection({ kind: 'room', id: room.id });
@@ -452,6 +596,13 @@ export function PlanPanel(props: Props) {
                     <option key={k} value={k}>{v.label}</option>
                   ))}
                 </select>
+                <button
+                  className="icon cut"
+                  title="Разделить: провести на плане линию границы"
+                  onClick={(e) => { e.stopPropagation(); askSplit([{ roomId: r.id, marks: [], words: [] }]); }}
+                >
+                  {SCISSORS}
+                </button>
                 <button className="icon" title="Удалить помещение" onClick={(e) => { e.stopPropagation(); removeRoom(r.id); }}>×</button>
                 <div className="room-sub muted small">
                   <span className="num">{fmt(calcM2)} м² по контуру</span>
