@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { Box } from '../engine/types';
+import type { Box, Pt } from '../engine/types';
 
 /**
  * Общее состояние панели «План» и редактора плана: какую подпись подсветить, ждём ли обводку подписи на плане,
@@ -9,9 +9,11 @@ export interface PlanUiState {
   highlight: Box | null;
   outlineEdit: boolean;
   pick: { roomId: string; field: 'name' | 'area'; onPick: (box: Box) => void } | null;
+  /** Ждём, пока пользователь проведёт на плане примерную границу между смежными помещениями. */
+  split: { roomId: string; onLine: (a: Pt, b: Pt) => void } | null;
 }
 
-let state: PlanUiState = { highlight: null, pick: null, outlineEdit: false };
+let state: PlanUiState = { highlight: null, pick: null, split: null, outlineEdit: false };
 const subs = new Set<() => void>();
 
 export const planUi = {
