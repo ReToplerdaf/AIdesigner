@@ -6,6 +6,7 @@ import { AUTO_PASSAGE, roomAt, withPassageSpec } from '../engine/placement';
 import { wallAngle } from '../engine/wall';
 import { sharedWalls, snapHole } from '../engine/passages';
 import type { Device, DeviceKind, DeviceTypeKey, Project, ProjectCalc, Pt, Room } from '../engine/types';
+import { labelStore, useLabelStore } from './labelStore';
 import { DRAG_MIME, fmt, groupColor, type DragPayload, type Selection, type Tool, type Update } from './state';
 
 interface Props {
@@ -31,6 +32,7 @@ type Drag =
   | { kind: 'box'; key: string; dx: number; dy: number }
   | { kind: 'pan'; start: Pt; view: View; inv: DOMMatrix }
   | { kind: 'room'; start: Pt }
+  | { kind: 'pick'; start: Pt }
   | { kind: 'corner' | 'edge'; roomId: string; idx: number; start: Pt; orig: Pt[] }
   | null;
 
@@ -92,6 +94,7 @@ export function PlanEditor(props: Props) {
   const [calPts, setCalPts] = useState<Pt[]>([]);
   const [polyPts, setPolyPts] = useState<Pt[]>([]);
   const [hover, setHover] = useState<Pt | null>(null);
+  const labels = useLabelStore();
   const [dropping, setDropping] = useState(false);
   const [layer, setLayer] = useState<Layer>(() => {
     try {
@@ -170,6 +173,14 @@ export function PlanEditor(props: Props) {
     setPolyPts([]);
   };
 
+  // Палочка ждёт обводку подписи: Esc отменяет.
+  useEffect(() => {
+    if (!labels.pick) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && labelStore.set({ pick: null });
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [labels.pick]);
+
   useEffect(() => {
     if (tool !== 'poly') return;
     const onKey = (e: KeyboardEvent) => {
@@ -197,6 +208,10 @@ export function PlanEditor(props: Props) {
     const svg = svgRef.current!;
     svg.setPointerCapture(e.pointerId);
     const p = toSvg(e.clientX, e.clientY);
+    if (labels.pick && e.button === 0) {
+      setDrag({ kind: 'pick', start: p });
+      return;
+    }
     if (tool === 'room' && e.button === 0) {
       setDrag({ kind: 'room', start: p });
       return;
@@ -266,7 +281,7 @@ export function PlanEditor(props: Props) {
       update((pr) => ({ ...pr, boxPos: { ...pr.boxPos, [drag.key]: pos } }));
     } else if (drag.kind === 'panel') {
       update((pr) => ({ ...pr, panel: { x: Math.round(p.x + drag.dx), y: Math.round(p.y + drag.dy) } }));
-    } else if (drag.kind === 'room') {
+    } else if (drag.kind === 'room' || drag.kind === 'pick') {
       setPreview(rect(drag.start.x, drag.start.y, p.x, p.y));
     } else if (drag.kind === 'corner' || drag.kind === 'edge') {
       const delta = { x: p.x - drag.start.x, y: p.y - drag.start.y };
@@ -284,6 +299,11 @@ export function PlanEditor(props: Props) {
     if (drag?.kind === 'room' && preview) {
       const b = bbox(preview);
       if (b.maxX - b.minX > 300 && b.maxY - b.minY > 300) props.onRoomDrawn(preview.map((q) => ({ x: Math.round(q.x), y: Math.round(q.y) })));
+    }
+    if (drag?.kind === 'pick' && preview && labels.pick) {
+      const b = bbox(preview);
+      if (b.maxX - b.minX > 50 && b.maxY - b.minY > 30)
+        labels.pick.onPick({ x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY });
     }
     if (drag?.kind === 'corner' || drag?.kind === 'edge') {
       // Контур изменился — приборы у его границы могли оказаться в другом помещении.
@@ -336,7 +356,7 @@ export function PlanEditor(props: Props) {
   };
 
   const unit = view.w / 1000; // примерно мм на пиксель при ширине окна ~1000 px
-  const cursor = tool === 'select' ? (drag?.kind === 'pan' ? 'grabbing' : 'grab') : 'crosshair';
+  const cursor = labels.pick ? 'crosshair' : tool === 'select' ? (drag?.kind === 'pan' ? 'grabbing' : 'grab') : 'crosshair';
 
   return (
     <div
@@ -539,10 +559,26 @@ export function PlanEditor(props: Props) {
         {preview && (
           <polygon
             points={preview.map((p) => `${p.x},${p.y}`).join(' ')}
-            fill="var(--accent-soft)"
-            stroke="var(--accent)"
+            fill={drag?.kind === 'pick' ? 'var(--src-soft)' : 'var(--accent-soft)'}
+            stroke={drag?.kind === 'pick' ? 'var(--src)' : 'var(--accent)'}
+            strokeWidth={2}
+            strokeDasharray={drag?.kind === 'pick' ? '6 4' : undefined}
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
+        {labels.highlight && (
+          <rect
+            className="src-box"
+            x={labels.highlight.x - unit * 4}
+            y={labels.highlight.y - unit * 4}
+            width={labels.highlight.w + unit * 8}
+            height={labels.highlight.h + unit * 8}
+            rx={unit * 3}
+            fill="var(--src-soft)"
+            stroke="var(--src)"
             strokeWidth={2}
             vectorEffect="non-scaling-stroke"
+            style={{ pointerEvents: 'none' }}
           />
         )}
         {tool === 'poly' && polyPts.length > 0 && (
@@ -633,17 +669,23 @@ export function PlanEditor(props: Props) {
         ))}
       </div>
       <div className="plan-hint">
-        {tool === 'select' && 'Тащите точки по плану или приборы из списка слева. Клик по прибору открывает его в спецификации. Колесо — масштаб.'}
-        {tool === 'calibrate' && (calPts.length === 0 ? 'Кликните первую точку известного размера' : 'Кликните вторую точку')}
-        {tool === 'room' && 'Растяните прямоугольник помещения'}
-        {tool === 'poly' &&
-          (polyPts.length < 3
-            ? 'Кликайте по углам комнаты'
-            : 'Замкните: клик по первой точке, двойной клик или Enter. Backspace — убрать точку')}
-        {tool === 'stretch' &&
-          (selection?.kind === 'room'
-            ? 'Тяните угол — комната растягивается в две стороны, стену — в одну. Двойной клик: угол убрать, на стене — добавить'
-            : 'Кликните помещение, чтобы править его контур')}
+        {labels.pick ? (
+          `Обведите рамкой ${labels.pick.field === 'name' ? 'название' : 'площадь'} помещения на плане. Esc — отмена`
+        ) : (
+          <>
+          {tool === 'select' && 'Тащите точки по плану или приборы из списка слева. Клик по прибору открывает его в спецификации. Колесо — масштаб.'}
+          {tool === 'calibrate' && (calPts.length === 0 ? 'Кликните первую точку известного размера' : 'Кликните вторую точку')}
+          {tool === 'room' && 'Растяните прямоугольник помещения'}
+          {tool === 'poly' &&
+            (polyPts.length < 3
+              ? 'Кликайте по углам комнаты'
+              : 'Замкните: клик по первой точке, двойной клик или Enter. Backspace — убрать точку')}
+          {tool === 'stretch' &&
+            (selection?.kind === 'room'
+              ? 'Тяните угол — комната растягивается в две стороны, стену — в одну. Двойной клик: угол убрать, на стене — добавить'
+              : 'Кликните помещение, чтобы править его контур')}
+          </>
+        )}
       </div>
     </div>
   );

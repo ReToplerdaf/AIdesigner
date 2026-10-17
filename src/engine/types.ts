@@ -15,11 +15,25 @@ export type RoomType =
   | 'balcony'
   | 'other';
 
+/** Прямоугольник на плане, мм. */
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface Room {
   id: string;
   name: string;
   type: RoomType;
   poly: Pt[];
+  /** Площадь, подписанная на плане, м²: распознана с подложки или введена вручную. */
+  planAreaM2?: number;
+  /** Где на подложке прочитано название. */
+  nameSrc?: Box;
+  /** Где на подложке прочитана площадь. */
+  areaSrc?: Box;
 }
 
 /**

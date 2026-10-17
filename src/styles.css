@@ -8,6 +8,8 @@
   --wall: #3a4750;
   --accent: #0b6e8a;
   --accent-soft: rgba(11, 110, 138, 0.12);
+  --src: #1c7ed6;
+  --src-soft: rgba(28, 126, 214, 0.14);
   --ok: #2f7a45;
   --bad: #c92a2a;
   --font: 'Golos Text', 'Segoe UI', Roboto, Arial, sans-serif;
@@ -103,7 +105,16 @@ textarea { width: 100%; font-family: var(--mono); font-size: 12px; resize: verti
 .calib input { width: 100px; }
 
 .rooms { display: flex; flex-direction: column; gap: 4px; }
-.room-row { display: grid; grid-template-columns: 1fr 110px 54px 20px; gap: 6px; align-items: center; padding: 3px; border-radius: 4px; }
+.room-row { display: grid; grid-template-columns: 1fr 22px 110px 20px; gap: 4px 6px; align-items: center; padding: 3px; border-radius: 4px; }
+.room-sub { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.room-sub label { display: inline-flex; align-items: center; gap: 4px; }
+.room-sub input { width: 58px; font-size: 12px; padding: 1px 4px; }
+.room-sub .warn { color: var(--bad); }
+.room-sub .warn input { border-color: var(--bad); }
+.icon.wand { display: inline-flex; align-items: center; justify-content: center; color: var(--accent); }
+.icon.wand:hover { color: var(--ink); }
+.icon.wand:disabled { opacity: 0.35; }
+.status-line.hint .bar { display: none; }
 .room-row.sel { background: var(--accent-soft); }
 .room-row select { font-size: 12px; }
 
