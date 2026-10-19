@@ -42,6 +42,11 @@ export interface DimLine {
   a: Pt;
   b: Pt;
   lenPx: number;
+  /**
+   * Тот же отрезок до первых поперечных черт по обе стороны от числа, если они не концы всей линии:
+   * в цепочке размеров это своё звено, а не вся цепочка. Какой из двух верный, решают сверка и пользователь.
+   */
+  inner?: DimLine;
 }
 
 /** Окошко считается упёршимся в засечку или выносную, если оно заполнено во столько раз больше, чем на голой линии. */
@@ -97,12 +102,24 @@ export function traceDimLine(ink: Ink, numBox: Box): DimLine | null {
     return false;
   };
 
-  // Окошко бежит от числа в сторону; первый всплеск заполнения — засечка, стрелка или выносная.
-  // Конец отрезка — самое заполненное место всплеска. Если всплеска нет, конец там, где линия пропала.
+  const col = (xx: number) => {
+    let n = 0;
+    for (let y = yc - r; y <= yc + r; y++) if (at(xx, y)) n++;
+    return n;
+  };
+  // Сколько линия может выступать за выносную, прежде чем кончиться: засечки ставят с небольшим вылетом линии.
+  const overshoot = Math.max(3 * r, Math.round(numBox.h * 1.5));
+
+  // Окошко бежит от числа в сторону до места, где линия пропала. Каждый всплеск заполнения по пути — поперечная черта:
+  // засечка, стрелка, выносная или чужая размерная линия. Конец отрезка — последняя черта, сразу за которой линия
+  // кончается; черты, за которыми линия идёт дальше, — пересечения, их проходим насквозь.
+  // Возвращает этот конец и первую черту (для цепочки размеров это конец своего звена).
   const walk = (dir: 1 | -1) => {
     let x = dir > 0 ? cx1 + r : cx0 - r; // у самого числа в окошко попадают низы цифр
     let last = x;
     let gap = 0;
+    const peaks: number[] = [];
+    let inPeak = false;
     for (;;) {
       x += dir;
       if (x < 0 || x >= W) break;
@@ -110,27 +127,28 @@ export function traceDimLine(ink: Ink, numBox: Box): DimLine | null {
         gap = 0;
         last = x;
       } else if (++gap > 2) break;
-      const f = fill(x);
-      if (f >= PEAK * base) {
-        // Окошко упёрлось в поперечную черту. Сам конец — столбец, где черты больше всего (середина, если таких несколько).
-        const col = (xx: number) => {
-          let n = 0;
-          for (let y = yc - r; y <= yc + r; y++) if (at(xx, y)) n++;
-          return n;
-        };
+      const hot = fill(x) >= PEAK * base;
+      if (hot && !inPeak) {
+        // Середина черты — столбец, где её больше всего (середина участка, если таких несколько).
         const cs = Array.from({ length: 2 * r + 1 }, (_, k) => col(x + dir * k));
         const top = Math.max(...cs);
         const ks = cs.flatMap((v, k) => (v === top ? [k] : []));
-        return x + dir * Math.round((ks[0] + ks[ks.length - 1]) / 2);
+        peaks.push(x + dir * Math.round((ks[0] + ks[ks.length - 1]) / 2));
       }
+      inPeak = hot;
     }
-    return last;
+    const lastPeak = peaks[peaks.length - 1];
+    const end = lastPeak != null && Math.abs(last - lastPeak) <= overshoot ? lastPeak : last;
+    return { end, first: peaks[0] ?? end };
   };
-  const xa = walk(-1);
-  const xb = walk(1);
-  const lenPx = xb - xa;
-  if (lenPx < 1.5 * span) return null;
-  return { a: { x: xa, y: yc }, b: { x: xb, y: yc }, lenPx };
+  const wa = walk(-1);
+  const wb = walk(1);
+  const line = (xa: number, xb: number): DimLine | null =>
+    xb - xa >= 1.5 * span ? { a: { x: xa, y: yc }, b: { x: xb, y: yc }, lenPx: xb - xa } : null;
+  const full = line(wa.end, wb.end);
+  if (!full) return null;
+  const inner = wa.first !== wa.end || wb.first !== wb.end ? line(wa.first, wb.first) : null;
+  return inner ? { ...full, inner } : full;
 }
 
 /** Шахматное расстояние до ближайшего пикселя, где set[i] === 1 (две прохода). */

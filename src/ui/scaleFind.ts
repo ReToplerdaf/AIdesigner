@@ -64,6 +64,7 @@ export async function findScale(image: PlanImage, step: (pct: number, text: stri
     const num = toRaster(w.box);
     const line = traceDimLine(ink, num);
     if (line) dims.push({ mm, line, num });
+    if (line?.inner) dims.push({ mm, line: line.inner, num });
   }
 
   step(90, 'Сверяю с площадями комнат…');
