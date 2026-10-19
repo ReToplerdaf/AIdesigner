@@ -68,6 +68,13 @@ interface SplitTask {
   words: OcrWord[];
 }
 
+/** «1 находка», «3 находки», «5 находок». */
+const findings = (n: number) => {
+  const d = n % 10;
+  const dd = n % 100;
+  return d === 1 && dd !== 11 ? 'находка' : d >= 2 && d <= 4 && (dd < 12 || dd > 14) ? 'находки' : 'находок';
+};
+
 /** Даёт браузеру перерисовать строку состояния перед тяжёлым шагом. */
 const frame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
 
@@ -572,7 +579,7 @@ export function PlanPanel(props: Props) {
                   ? `Размер «${scaleCand.text}»: его линия подсвечена на плане.`
                   : `Комната с площадью «${scaleCand.text}» подсвечена, отрезок от стены до стены получается ${fmt(segMm(scaleCand, scaleCand.mmPerPx), 0)} мм.`}{' '}
                 Тогда план {fmt((project.image.widthPx * scaleCand.mmPerPx) / 1000, 1)} × {fmt((project.image.heightPx * scaleCand.mmPerPx) / 1000, 1)} м
-                {scaleCand.support ? `, с этим согласны ещё ${scaleCand.support} находк${scaleCand.support === 1 ? 'а' : scaleCand.support < 5 ? 'и' : 'ок'}.` : '.'}
+                {scaleCand.support ? `, с этим согласны ещё ${scaleCand.support} ${findings(scaleCand.support)}.` : '.'}
               </span>
               <div className="row">
                 <button id="scale-ok" className="btn primary small" onClick={acceptScale}>Верно</button>
