@@ -1,6 +1,6 @@
 // Поиск масштаба по подложке: читает все числа на плане, ищет под размерами линии, от подписей площади заливает комнаты.
 // Возвращает варианты масштаба по убыванию доверия; какой верный, подтверждает пользователь.
-import { agree, dimensionOf, inkOf, roomFills, scaleFromAreas, traceDimLine, withSupport, type DimLine } from '../engine/dimDetect';
+import { agree, dimensionOf, dimSegments, inkOf, roomFills, vote, withSupport, type DimLine } from '../engine/dimDetect';
 import { areaOf, unionBox, type OcrWord } from '../engine/roomLabels';
 import type { Box, PlanImage, Pt } from '../engine/types';
 import { loadOcr, ocrBox } from './ocr';
@@ -51,20 +51,20 @@ export async function findScale(image: PlanImage, step: (pct: number, text: stri
   );
 
   step(80, 'Ищу размерные линии…');
-  const raster = await rasterOf(image);
+  // Засечки и тонкие линии теряются при уменьшении, поэтому растр — в полном размере (до разумного предела).
+  const raster = await rasterOf(image, 4000);
   const ink = inkOf(raster.rgba, raster.width, raster.height);
   const rk = raster.width / image.widthPx; // пикселей растра на пиксель картинки
   const toRaster = (b: Box): Box => ({ x: (b.x / k) * rk, y: (b.y / k) * rk, w: (b.w / k) * rk, h: (b.h / k) * rk });
   const toImage = (b: Box): Box => ({ x: b.x / rk, y: b.y / rk, w: b.w / rk, h: b.h / rk });
 
-  const dims: { mm: number; line: DimLine; num: Box }[] = [];
+  const dims: { mm: number; segs: DimLine[]; num: Box }[] = [];
   for (const w of words) {
     const mm = dimensionOf(w.text);
     if (mm == null) continue;
     const num = toRaster(w.box);
-    const line = traceDimLine(ink, num);
-    if (line) dims.push({ mm, line, num });
-    if (line?.inner) dims.push({ mm, line: line.inner, num });
+    const segs = dimSegments(ink, num);
+    if (segs.length) dims.push({ mm, segs, num });
   }
 
   step(90, 'Сверяю с площадями комнат…');
@@ -77,11 +77,19 @@ export async function findScale(image: PlanImage, step: (pct: number, text: stri
     ink,
     areas.map((a) => ({ at: { x: a.num.x + a.num.w / 2, y: a.num.y + a.num.h / 2 }, m2: a.m2 })),
   );
-  const fromAreas = scaleFromAreas(fills, dims.map((d) => d.mm / d.line.lenPx));
+  // Общее голосование: каждый размер и каждая подпись площади голосуют одним голосом за масштаб, с которым согласен
+  // хоть один их вариант (отрезок или заливка). Каждой находке достаётся её вариант, ближайший к победителю;
+  // размер, не согласный ни с кем, остаётся со своим первым отрезком и показывается в конце.
+  const v = vote([...dims.map((d) => d.segs.map((g) => d.mm / g.lenPx)), ...fills.map((fs) => fs.map((f) => f.mmPerPx))], 0.025);
+  const dimPick = dims.map((d, i) => ({ ...d, line: d.segs[v?.picks[i] ?? 0] }));
+  const areaPick = fills.map((fs, i) => {
+    const k = v?.picks[dims.length + i];
+    return k == null ? null : fs[k];
+  });
 
   type Source = Omit<ScaleCandidate, 'mmPerPx' | 'support'>;
   const guesses: { mmPerPx: number; source: Source }[] = [
-    ...dims.map((d) => ({
+    ...dimPick.map((d) => ({
       mmPerPx: (d.mm / d.line.lenPx) * rk,
       source: {
         kind: 'dim' as const,
@@ -91,7 +99,7 @@ export async function findScale(image: PlanImage, step: (pct: number, text: stri
         seg: { a: { x: d.line.a.x / rk, y: d.line.a.y / rk }, b: { x: d.line.b.x / rk, y: d.line.b.y / rk } },
       },
     })),
-    ...(fromAreas?.picks ?? []).flatMap((p, i) => {
+    ...areaPick.flatMap((p, i) => {
       if (!p) return [];
       // Отрезок от стены до стены — вдоль длинной стороны комнаты, через её середину.
       const b = toImage(p.box);
@@ -105,7 +113,13 @@ export async function findScale(image: PlanImage, step: (pct: number, text: stri
   // Сначала то, с чем согласно больше всего других находок; при равенстве — размер (чем больше, тем точнее),
   // затем комната (чем ровнее прямоугольник, тем надёжнее её площадь).
   const rank = (g: { source: Source }) => (g.source.kind === 'dim' ? 1e9 + g.source.value : g.source.rect ?? 0);
-  return withSupport(guesses)
+  // Масштаб, при котором весь лист — меньше комнаты или больше квартала, заведомо неверен (подчёркнутая площадь,
+  // прочитанная как размер, и т. п.): такие находки не показываем.
+  const sane = (mmPerPx: number) => {
+    const side = Math.max(image.widthPx, image.heightPx) * mmPerPx;
+    return side >= 2000 && side <= 150_000;
+  };
+  return withSupport(guesses.filter((g) => sane(g.mmPerPx)))
     .sort((a, b) => b.support - a.support || rank(b) - rank(a))
     .map((g) => ({ ...g.source, mmPerPx: g.mmPerPx, support: g.support }));
 }
