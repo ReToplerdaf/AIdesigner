@@ -11,9 +11,11 @@ export interface PlanUiState {
   measure: { a: Pt; b: Pt; label: string } | null;
   outlineEdit: boolean;
   pick: { roomId: string; field: 'name' | 'area'; onPick: (box: Box) => void } | null;
+  /** Ждём, пока пользователь проведёт на плане примерную границу между смежными помещениями. */
+  split: { roomId: string; onLine: (a: Pt, b: Pt) => void } | null;
 }
 
-let state: PlanUiState = { highlight: null, measure: null, pick: null, outlineEdit: false };
+let state: PlanUiState = { highlight: null, measure: null, pick: null, split: null, outlineEdit: false };
 const subs = new Set<() => void>();
 
 export const planUi = {
