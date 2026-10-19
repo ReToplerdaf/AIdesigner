@@ -1,12 +1,15 @@
 // Распознавание помещений на растровом плане (картинка, скан, PDF, сохранённый картинкой).
 // Конвейер классического компьютерного зрения на OpenCV.js:
-//   1) тёмные пиксели — кандидаты в стены (порог Оцу);
+//   1) тёмные пиксели — всё, что заметно темнее бумаги; сплошные заливки пола убираются;
 //   2) если сплошных стен нет, стены из двух тонких линий заливаются (узкие замкнутые полости);
-//   3) тонкие линии — текст, размеры, мебель, дуги дверей — убираются морфологическим открытием;
-//   4) проёмы дверей и окон «зашиваются» мостиком между двумя торцами стены;
-//   5) замкнутые области, не касающиеся края картинки, — помещения; контур упрощается и выпрямляется.
+//   3) карта линий (lineMap.ts): всё нарисованное становится отрезками с толщиной, стенами считаются толстые
+//      и длинные тонкие, примыкающие к ним; текст, размеры, мебель, дуги дверей в стены не попадают;
+//   4) проёмы дверей и окон «зашиваются» мостиком между двумя торцами стены — под любым углом;
+//   5) замкнутые области, не касающиеся края картинки, — помещения; узкие полоски отбрасываются,
+//      контур упрощается и выпрямляется.
 // Модуль не зависит от браузера: OpenCV передаётся параметром, поэтому его можно проверить тестами.
 
+import { buildLineMap, drawSeg, endBridges, wallPixels } from './lineMap';
 import { area as polyArea, pointInPolygon } from './geometry';
 import type { Pt } from './types';
 
@@ -38,6 +41,11 @@ export interface DetectOptions {
    * комнаты попадают ниши оконных проёмов, зато эркер не отрезается от комнаты.
    */
   windowBridges?: boolean;
+  /**
+   * Стены — по карте линий (по умолчанию да): только линии, признанные стенами, без мебели, размеров и текста,
+   * и проёмы закрываются между концами стен под любым углом.
+   */
+  lineMap?: boolean;
   /** Граница дома, мм: помещения ищутся только внутри неё. */
   boundary?: Pt[];
   /** Вызывается перед каждым этапом, чтобы интерфейс успел показать состояние. */
@@ -74,6 +82,8 @@ const DIAG_GAP_MM = 1400;
 const SIDE_GAP_MM = 1000;
 /** Наибольшая ширина окна, которое закрываем при поиске границы дома по коротким простенкам. */
 const WINDOW_MM = 2500;
+/** Помещение уже 2×SLIVER_HALF_MM нигде — узкая полоска, а не комната, мм. */
+const SLIVER_HALF_MM = 300;
 /** Тёмные области толще этого — заливка пола или чёрный фон, а не стена, мм. */
 const FILL_MM = 1000;
 /** Линии тоньше этого считаются графикой, а не стеной, мм. */
@@ -89,7 +99,18 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
 
   try {
     await opts.onStage?.('walls');
-    const { walls, wallPx, tMin } = wallMask(cv, plan, keep, opts.thinScale);
+    const { walls, wallPx, tMin, solid, solidDist } = wallMask(cv, plan, keep, opts.thinScale);
+    let ends: { a: { x: number; y: number }; b: { x: number; y: number }; w: number }[] = [];
+    if (opts.lineMap ?? true) {
+      const sd = solid.data as Uint8Array;
+      const bin = new Uint8Array(N);
+      for (let i = 0; i < N; i++) bin[i] = sd[i] ? 1 : 0;
+      const map = buildLineMap(bin, solidDist.data32F as Float32Array, W, H, mmPerPx);
+      const wp = wallPixels(map, bin);
+      const wdat = walls.data as Uint8Array;
+      for (let i = 0; i < N; i++) wdat[i] = wp[i] ? 255 : 0;
+      ends = endBridges(map, maxGapMm / mmPerPx, wp, SIDE_GAP_MM / mmPerPx);
+    }
 
     // 4. Проёмы. Мостик ставится, только если по обе стороны — торцы стены, а не длинные стены поперёк:
     // иначе узкий коридор или санузел «зашился» бы целиком.
@@ -98,6 +119,7 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
     const maxGapPx = maxGapMm / mmPerPx;
     const maxEndPx = Math.max(1.6 * wallPx, 3 * tMin, 3);
     const bridge = new Uint8Array(N);
+    for (const e of ends) drawSeg(bridge, W, H, e.a, e.b, Math.max(2, e.w));
     let bridgedPx = bridgeGaps(wd, W, H, maxGapPx, maxEndPx, bridge, 2, 1.5 * wallPx, true, SIDE_GAP_MM / mmPerPx);
     bridgedPx += bridgeDiagonal(wd, W, H, Math.min(maxGapPx, DIAG_GAP_MM / mmPerPx), maxEndPx, 2, bridge);
     bridgedPx += bridgeSkewed(cv, walls, wallPx, maxGapPx, maxEndPx, bridge, keep);
@@ -150,6 +172,8 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
     for (let k = 1; k < n2; k++) {
       const s = stat(st2, k);
       if (s.area < minAreaPx || s.area > 0.6 * N || touchesBorder(st2, k, W, H)) continue;
+      // Узкая полоска (ниша окна, щель между стеной и шкафом) — не помещение: в неё не вписать и 0,6 м.
+      if (fdd[firstPx[k]] * mmPerPx < SLIVER_HALF_MM) continue;
       const poly = contourOf(cv, l2, W, k, s, eps, keep);
       if (!poly || poly.length < 3) continue;
       const fp = firstPx[k];
@@ -166,7 +190,7 @@ export async function detectRooms(cv: OpenCV, plan: RasterPlan, opts: DetectOpti
 }
 
 /** Шаги 1–3: маска стен (255 — стена), оценка толщины стен и порог «тонких» линий, пиксели. */
-export function wallMask(cv: OpenCV, plan: RasterPlan, keep: Keep, thinScale = 1): { walls: OpenCV; wallPx: number; tMin: number } {
+export function wallMask(cv: OpenCV, plan: RasterPlan, keep: Keep, thinScale = 1): { walls: OpenCV; wallPx: number; tMin: number; solid: OpenCV; solidDist: OpenCV } {
   const { width: W, height: H, mmPerPx } = plan;
     const src = keep(cv.matFromImageData({ data: plan.rgba, width: W, height: H }));
     const gray = keep(new cv.Mat());
@@ -212,7 +236,7 @@ export function wallMask(cv: OpenCV, plan: RasterPlan, keep: Keep, thinScale = 1
     } else solid.copyTo(walls);
     dropSpecks(cv, walls, Math.max(20, (150 / mmPerPx) ** 2), keep);
 
-    return { walls, wallPx, tMin };
+    return { walls, wallPx, tMin, solid, solidDist };
 }
 
 /**
@@ -689,12 +713,14 @@ export interface AreaTarget {
  * Варианты распознавания по очереди: не закрывать окна вдоль границы (эркер отрезан от комнаты), сильнее чистить
  * линии (мебель режет комнату), шире закрывать проёмы (комната утекает).
  */
-const VARIANTS: Pick<DetectOptions, 'thinScale' | 'maxGapMm' | 'windowBridges'>[] = [
+const VARIANTS: Pick<DetectOptions, 'thinScale' | 'maxGapMm' | 'windowBridges' | 'lineMap'>[] = [
   { windowBridges: false },
-  { thinScale: 1.6 },
-  { thinScale: 2.4 },
   { maxGapMm: 3600 },
-  { thinScale: 1.6, maxGapMm: 3600 },
+  // Прежний способ — стены по толщине пикселей, без карты линий: выручает, где карта ошиблась.
+  { lineMap: false },
+  { lineMap: false, thinScale: 1.6 },
+  { lineMap: false, thinScale: 2.4 },
+  { lineMap: false, thinScale: 1.6, maxGapMm: 3600 },
 ];
 
 /**
