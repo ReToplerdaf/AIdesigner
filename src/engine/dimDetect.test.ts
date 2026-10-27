@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dimensionOf, roomFills, scaleFromAreas, traceDimLine, type Ink } from './dimDetect';
+import { dimensionOf, dimSegments, roomFills, scaleFromAreas, traceDimLine, vote, type Ink } from './dimDetect';
 
 /** Белый лист и чёрные прямоугольники, как в тестах распознавания помещений. */
 function sheet(w: number, h: number) {
@@ -71,20 +71,29 @@ describe('размерная линия', () => {
     expect(l.b.x).toBe(640);
   });
 
-  it('цепочка размеров: вся линия и своё звено', () => {
+  it('цепочка размеров: своё звено первым, вся цепочка не подходит — число не посередине', () => {
     const s = sheet(700, 120);
     s.box(50, 60, 651, 61);
     for (const x of [60, 300, 640]) s.box(x, 40, x + 1, 80);
-    for (let i = 0; i < 4; i++) s.box(160 + i * 8, 44, 166 + i * 8, 56); // число над первым звеном
-    const l = traceDimLine(s.ink, { x: 160, y: 44, w: 30, h: 12 })!;
-    expect([l.a.x, l.b.x]).toEqual([60, 640]);
-    expect([l.inner!.a.x, l.inner!.b.x]).toEqual([60, 300]);
+    for (let i = 0; i < 4; i++) s.box(165 + i * 8, 44, 171 + i * 8, 56); // число над первым звеном
+    const segs = dimSegments(s.ink, { x: 165, y: 44, w: 30, h: 12 });
+    expect([segs[0].a.x, segs[0].b.x]).toEqual([60, 300]);
+    expect(segs.some((g) => g.a.x === 60 && g.b.x === 640)).toBe(false);
   });
 
   it('под числом стена, а не размерная линия', () => {
     const s = sheet(700, 120);
     s.box(50, 58, 650, 80);
     expect(traceDimLine(s.ink, { x: 320, y: 44, w: 38, h: 12 })).toBeNull();
+  });
+});
+
+describe('голосование за масштаб', () => {
+  it('побеждает масштаб, с которым согласно больше всего находок, у каждой — ближайший вариант', () => {
+    const v = vote([[7.0, 10.2], [6.95, 3.1], [7.05], [12]], 0.025)!;
+    expect(v.votes).toBe(3);
+    expect(v.mmPerPx).toBeCloseTo(7.0, 2);
+    expect(v.picks).toEqual([0, 0, 0, null]);
   });
 });
 

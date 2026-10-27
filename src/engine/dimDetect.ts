@@ -38,31 +38,31 @@ export function dimensionOf(text: string): number | null {
 }
 
 export interface DimLine {
-  /** Концы размерной линии, пиксели. */
+  /** Концы отрезка, пиксели. */
   a: Pt;
   b: Pt;
   lenPx: number;
-  /**
-   * Тот же отрезок до первых поперечных черт по обе стороны от числа, если они не концы всей линии:
-   * в цепочке размеров это своё звено, а не вся цепочка. Какой из двух верный, решают сверка и пользователь.
-   */
-  inner?: DimLine;
 }
 
-/** Окошко считается упёршимся в засечку или выносную, если оно заполнено во столько раз больше, чем на голой линии. */
-const PEAK = 1.6;
-
 /**
- * Размерная линия под (или над) горизонтальным числом. numBox — рамка числа, пиксели.
- * Возвращает null, если под числом нет тонкой линии длиннее самого числа.
+ * Возможные отрезки размера под (или над) горизонтальным числом, самые правдоподобные первыми. numBox — рамка числа, пиксели.
+ *
+ * Под числом ищется тонкая сплошная линия. По ней от числа в обе стороны бежит окошко чуть шире линии до места,
+ * где линия пропала, и отмечает все поперечные черты по пути: засечки, точки, стрелки, выносные, чужие размерные
+ * линии, стены. Сплошная заливка (стена) даёт две черты — по своим краям.
+ *
+ * Какие две черты — концы именно этого размера, по одной линии не понять: на ней бывает цепочка размеров
+ * и много пересечений. Но число на чертеже стоит посередине своего отрезка, поэтому кандидаты — пары черт
+ * слева и справа, середина которых близка к середине числа. Верную пару выбирает согласие с другими размерами
+ * и площадями (consensusScale) и пользователь.
  */
-export function traceDimLine(ink: Ink, numBox: Box): DimLine | null {
+export function dimSegments(ink: Ink, numBox: Box): DimLine[] {
   const { width: W, height: H, data } = ink;
   const at = (x: number, y: number) => x >= 0 && y >= 0 && x < W && y < H && data[y * W + x] === 1;
   const cx0 = Math.max(0, Math.round(numBox.x));
   const cx1 = Math.min(W - 1, Math.round(numBox.x + numBox.w));
   const span = cx1 - cx0 + 1;
-  if (span < 3) return null;
+  if (span < 3) return [];
   const rowFull = (y: number) => {
     if (y < 0 || y >= H) return false;
     let n = 0;
@@ -86,40 +86,37 @@ export function traceDimLine(ink: Ink, numBox: Box): DimLine | null {
     return null;
   };
   const row = findRow(1) ?? findRow(-1);
-  if (!row) return null;
+  if (!row) return [];
   const { y0, y1 } = row;
   const yc = Math.round((y0 + y1) / 2);
   const thick = y1 - y0 + 1;
   const r = thick + 3;
-  const fill = (x: number) => {
-    let n = 0;
-    for (let y = yc - r; y <= yc + r; y++) for (let xx = x - r; xx <= x + r; xx++) if (at(xx, y)) n++;
-    return n;
-  };
-  const base = (2 * r + 1) * thick;
   const onLine = (x: number) => {
     for (let y = y0 - 1; y <= y1 + 1; y++) if (at(x, y)) return true;
     return false;
   };
-
-  const col = (xx: number) => {
+  // Поперечное в столбце: тёмное в окошке над и под линией, сама линия не считается.
+  const cross = (x: number) => {
     let n = 0;
-    for (let y = yc - r; y <= yc + r; y++) if (at(xx, y)) n++;
-    return n;
+    for (let y = yc - r; y <= yc + r; y++) if ((y < y0 - 1 || y > y1 + 1) && at(x, y)) n++;
+    return n >= 2;
   };
-  // Сколько линия может выступать за выносную, прежде чем кончиться: засечки ставят с небольшим вылетом линии.
-  const overshoot = Math.max(3 * r, Math.round(numBox.h * 1.5));
 
-  // Окошко бежит от числа в сторону до места, где линия пропала. Каждый всплеск заполнения по пути — поперечная черта:
-  // засечка, стрелка, выносная или чужая размерная линия. Конец отрезка — последняя черта, сразу за которой линия
-  // кончается; черты, за которыми линия идёт дальше, — пересечения, их проходим насквозь.
-  // Возвращает этот конец и первую черту (для цепочки размеров это конец своего звена).
+  /** Черты по одну сторону от числа (от ближней к дальней) и место, где линия кончилась. */
   const walk = (dir: 1 | -1) => {
     let x = dir > 0 ? cx1 + r : cx0 - r; // у самого числа в окошко попадают низы цифр
     let last = x;
     let gap = 0;
-    const peaks: number[] = [];
-    let inPeak = false;
+    const marks: number[] = [];
+    let run: number | null = null; // начало текущего участка поперечного
+    const closeRun = (end: number) => {
+      if (run == null) return;
+      const w = Math.abs(end - run) + 1;
+      // Узкое — засечка или чужая линия, конец в её середине; широкое — заливка, концы по её краям.
+      if (w <= 2 * r) marks.push(Math.round((run + end) / 2));
+      else marks.push(run, end);
+      run = null;
+    };
     for (;;) {
       x += dir;
       if (x < 0 || x >= W) break;
@@ -127,28 +124,58 @@ export function traceDimLine(ink: Ink, numBox: Box): DimLine | null {
         gap = 0;
         last = x;
       } else if (++gap > 2) break;
-      const hot = fill(x) >= PEAK * base;
-      if (hot && !inPeak) {
-        // Середина черты — столбец, где её больше всего (середина участка, если таких несколько).
-        const cs = Array.from({ length: 2 * r + 1 }, (_, k) => col(x + dir * k));
-        const top = Math.max(...cs);
-        const ks = cs.flatMap((v, k) => (v === top ? [k] : []));
-        peaks.push(x + dir * Math.round((ks[0] + ks[ks.length - 1]) / 2));
-      }
-      inPeak = hot;
+      if (cross(x)) run ??= x;
+      else closeRun(x - dir);
     }
-    const lastPeak = peaks[peaks.length - 1];
-    const end = lastPeak != null && Math.abs(last - lastPeak) <= overshoot ? lastPeak : last;
-    return { end, first: peaks[0] ?? end };
+    closeRun(last);
+    if (!marks.length || Math.abs(marks[marks.length - 1] - last) > r) marks.push(last);
+    return marks;
   };
-  const wa = walk(-1);
-  const wb = walk(1);
-  const line = (xa: number, xb: number): DimLine | null =>
-    xb - xa >= 1.5 * span ? { a: { x: xa, y: yc }, b: { x: xb, y: yc }, lenPx: xb - xa } : null;
-  const full = line(wa.end, wb.end);
-  if (!full) return null;
-  const inner = wa.first !== wa.end || wb.first !== wb.end ? line(wa.first, wb.first) : null;
-  return inner ? { ...full, inner } : full;
+  const left = walk(-1);
+  const right = walk(1);
+  const mid = (cx0 + cx1) / 2;
+
+  const out: { line: DimLine; off: number; k: number }[] = [];
+  left.forEach((xa, i) =>
+    right.forEach((xb, j) => {
+      const len = xb - xa;
+      if (len < 1.2 * span) return;
+      const off = Math.abs((xa + xb) / 2 - mid);
+      // Число может стоять не точно посередине (сдвинуто от засечки или выносной): допуск — доля длины и ширины числа.
+      if (off > Math.max(span * 0.6, len * 0.12)) return;
+      out.push({ line: { a: { x: xa, y: yc }, b: { x: xb, y: yc }, lenPx: len }, off, k: i + j });
+    }),
+  );
+  // Сначала ближайшие к числу черты (своё звено), при равенстве — точнее по центру.
+  out.sort((p, q) => p.k - q.k || p.off - q.off);
+  return out.slice(0, 6).map((o) => o.line);
+}
+
+/** Самый правдоподобный отрезок размера (см. dimSegments) или null. */
+export const traceDimLine = (ink: Ink, numBox: Box): DimLine | null => dimSegments(ink, numBox)[0] ?? null;
+
+/**
+ * Голосование за масштаб. У каждой находки (размера или комнаты) несколько возможных масштабов — по разным отрезкам
+ * или вариантам заливки; находка голосует за масштаб s, если хоть один её вариант с ним согласен.
+ * Возвращает масштаб с наибольшим числом голосов (медиана согласных вариантов) и для каждой находки номер
+ * её варианта, ближайшего к нему (или null, если она не согласна).
+ */
+export function vote(options: number[][], tol = TOL): { mmPerPx: number; votes: number; picks: (number | null)[] } | null {
+  const near = (a: number, b: number) => Math.abs(a - b) / Math.max(a, b) <= tol;
+  let best: { s: number; votes: number } | null = null;
+  for (const s of options.flat()) {
+    const votes = options.filter((o) => o.some((v) => near(v, s))).length;
+    if (!best || votes > best.votes) best = { s, votes };
+  }
+  if (!best) return null;
+  const s = best.s;
+  const picks = options.map((o) => {
+    let k: number | null = null;
+    o.forEach((v, i) => near(v, s) && (k == null || Math.abs(v - s) < Math.abs(o[k] - s)) && (k = i));
+    return k;
+  });
+  const agreeing = picks.flatMap((k, i) => (k == null ? [] : [options[i][k]])).sort((a, b) => a - b);
+  return { mmPerPx: agreeing[Math.floor(agreeing.length / 2)], votes: best.votes, picks };
 }
 
 /** Шахматное расстояние до ближайшего пикселя, где set[i] === 1 (две прохода). */
@@ -403,21 +430,9 @@ export const agree = (a: number, b: number) => Math.abs(a - b) / Math.max(a, b) 
  * они тоже голосуют.
  */
 export function scaleFromAreas(fills: AreaFit[][], extra: number[] = []): { mmPerPx: number; votes: number; picks: (AreaFit | null)[] } | null {
-  const all = fills.flat().map((f) => f.mmPerPx).concat(extra);
-  let best: { mmPerPx: number; votes: number } | null = null;
-  for (const s of all) {
-    const votes = fills.filter((fs) => fs.some((f) => agree(f.mmPerPx, s))).length + extra.filter((e) => agree(e, s)).length;
-    if (!best || votes > best.votes) best = { mmPerPx: s, votes };
-  }
-  if (!best) return null;
-  const s = best.mmPerPx;
-  const picks = fills.map((fs) => {
-    const ok = fs.filter((f) => agree(f.mmPerPx, s));
-    return ok.length ? ok.reduce((a, b) => (Math.abs(a.mmPerPx - s) < Math.abs(b.mmPerPx - s) ? a : b)) : null;
-  });
-  // Итог — медиана согласных оценок, а не первая попавшаяся.
-  const agreeing = [...picks.filter((p): p is AreaFit => !!p).map((p) => p.mmPerPx), ...extra.filter((e) => agree(e, s))].sort((a, b) => a - b);
-  return { mmPerPx: agreeing[Math.floor(agreeing.length / 2)] ?? s, votes: best.votes, picks };
+  const v = vote([...fills.map((fs) => fs.map((f) => f.mmPerPx)), ...extra.map((e) => [e])]);
+  if (!v) return null;
+  return { mmPerPx: v.mmPerPx, votes: v.votes, picks: fills.map((fs, i) => (v.picks[i] == null ? null : fs[v.picks[i]!])) };
 }
 
 /** Сколько других оценок согласны с каждой. */
