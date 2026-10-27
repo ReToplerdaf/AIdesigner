@@ -186,13 +186,14 @@ describe('подгонка под площадь с подписи', () => {
     s.box(530, 50, 550, 550);
     s.box(70, 300, 530, 306); // линия 60 мм от стены до стены: толще обычной мебели
     const plan = s.toPlan();
-    const base = await detectRooms(cv, plan);
+    // Прежний способ (по толщине пикселей) считает такую линию стеной; карта линий — нет, и подгонка не нужна.
+    const base = await detectRooms(cv, plan, { lineMap: false });
     expect(base.rooms).toHaveLength(2);
     const top = base.rooms.find((r) => r.inside.y < 3000)!;
-    const [fit] = await fitToAreas(cv, plan, {}, [{ inside: top.inside, m2: 21.2, poly: top.poly }], base.rooms.map((r) => r.inside));
+    const [fit] = await fitToAreas(cv, plan, { lineMap: false }, [{ inside: top.inside, m2: 21.2, poly: top.poly }], base.rooms.map((r) => r.inside));
     // Нижняя половина — отдельная найденная комната, её захватывать нельзя.
     expect(fit).toBeNull();
-    const [fit2] = await fitToAreas(cv, plan, {}, [{ inside: top.inside, m2: 21.2, poly: top.poly }], [top.inside]);
+    const [fit2] = await fitToAreas(cv, plan, { lineMap: false }, [{ inside: top.inside, m2: 21.2, poly: top.poly }], [top.inside]);
     expect(fit2).not.toBeNull();
     expect(m2(fit2!)).toBeGreaterThan(20.8);
     expect(m2(fit2!)).toBeLessThan(21.5);
